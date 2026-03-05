@@ -52,6 +52,7 @@ uv run mypy src/
 ## 🪝 Git Hooks
 
 ### Automatically Enabled After Setup
+
 - **pre-commit**: Runs before every commit
   - Format checking
   - Linting
@@ -65,6 +66,7 @@ uv run mypy src/
   - Integration tests + linting (main/release only)
 
 ### Skip Hooks (Use Sparingly)
+
 ```bash
 git commit --no-verify
 git push --no-verify
@@ -75,6 +77,7 @@ git push --no-verify
 Current coverage: **100%** on all models
 
 View coverage report:
+
 ```bash
 uv run pytest --cov=src --cov-report=html
 open htmlcov/index.html  # macOS
@@ -99,10 +102,12 @@ tests/
 ## ⚙️ CI/CD Pipeline
 
 GitHub Actions runs on:
+
 - Push to `main`, `release`, `feature/**`
 - Pull requests to `main`, `release`
 
 Pipeline stages:
+
 1. **Lint** - Format + style checks
 2. **Test** - Unit + integration tests
 3. **Security** - Vulnerability scanning
@@ -111,12 +116,14 @@ Pipeline stages:
 ## 🛠️ Troubleshooting
 
 ### Tests failing?
+
 ```bash
 uv sync --all-extras
 uv run pytest tests/unit/ -v
 ```
 
 ### Pre-commit issues?
+
 ```bash
 pre-commit clean
 pre-commit install --install-hooks
@@ -124,6 +131,7 @@ pre-commit run --all-files
 ```
 
 ### Hooks not running?
+
 ```bash
 ./setup-hooks.sh
 ```
