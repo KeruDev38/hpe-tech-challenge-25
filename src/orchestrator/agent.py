@@ -11,6 +11,7 @@ import json
 from datetime import datetime
 
 import redis.asyncio as redis
+from src.orchestrator import FleetService
 import structlog
 
 from src.models.alerts import PredictiveAlert
@@ -78,7 +79,9 @@ class OrchestratorAgent:
         self._redis_db = redis_db
         self._fleet_id = fleet_id
 
-        self.fleet: dict[str, VehicleStatusSnapshot] = {}
+        self.fleet_service = FleetService()
+
+        self.fleet = self.fleet_service.fleet
         self.emergencies: dict[str, Emergency] = {}
         self.dispatches: dict[str, Dispatch] = {}
 
