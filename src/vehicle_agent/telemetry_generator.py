@@ -2,7 +2,7 @@
 Telemetry generation for vehicle agents.
 
 This module generates synthetic vehicle telemetry data for simulation purposes.
-Phase 1: Simple constant values with Gaussian noise.
+Phase 1: Constant baseline values with Gaussian noise, differentiated per vehicle type.
 """
 
 import math
@@ -18,6 +18,8 @@ from src.vehicle_agent.config import (
     SF_LAT_MIN,
     SF_LON_MAX,
     SF_LON_MIN,
+    VEHICLE_BASELINES,
+    VEHICLE_NOISE_LEVELS,
     AgentConfig,
 )
 
@@ -25,10 +27,12 @@ logger = structlog.get_logger(__name__)
 
 
 class SimpleTelemetryGenerator:
-    """Simple telemetry generator using constant baseline values with noise.
+    """Simple telemetry generator using per-vehicle-type baseline values with noise.
 
     Generates realistic-looking telemetry by adding small random variations
-    to baseline constant values. This is sufficient for Phase 1 POC.
+    to baseline constant values.  Baselines are differentiated by vehicle type
+    (ambulance, fire truck, police) so that the ML model can learn type-specific
+    failure patterns.
     """
 
     def __init__(self, config: AgentConfig) -> None:
@@ -48,21 +52,11 @@ class SimpleTelemetryGenerator:
         self.current_speed_kmh = 0.0
         self.heading_degrees = random.uniform(0, 360)
 
-        # Baseline values for idle vehicle at station
-        self.baselines = {
-            "engine_temp_celsius": 90.0,
-            "battery_voltage": 13.8,
-            "fuel_level_percent": 75.0,
-            "odometer_km": 45678.9,
-        }
+        # Per-vehicle-type baseline values (deep-copy so mutations stay per-instance)
+        self.baselines: dict[str, float] = dict(VEHICLE_BASELINES[config.vehicle_type])
 
-        # Noise levels (as fraction of baseline value)
-        self.noise_levels = {
-            "engine_temp_celsius": 0.02,  # ±2%
-            "battery_voltage": 0.02,
-            "fuel_level_percent": 0.01,
-            "odometer_km": 0.0,  # Doesn't change when parked
-        }
+        # Noise levels are shared (same relative noise for all types)
+        self.noise_levels: dict[str, float] = dict(VEHICLE_NOISE_LEVELS)
 
     def set_target_location(self, lat: float, lon: float) -> None:
         """Set a target destination for the vehicle."""
@@ -100,6 +94,9 @@ class SimpleTelemetryGenerator:
             engine_temp_celsius=self._add_noise("engine_temp_celsius"),
             battery_voltage=self._add_noise("battery_voltage"),
             fuel_level_percent=self._add_noise("fuel_level_percent"),
+            oil_pressure_bar=self._add_noise("oil_pressure_bar"),
+            vibration_ms2=self._add_noise("vibration_ms2"),
+            brake_pad_mm=self._add_noise("brake_pad_mm"),
         )
 
         logger.debug(
