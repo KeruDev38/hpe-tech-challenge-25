@@ -171,9 +171,7 @@ class TestFailureInjector:
 
         # Engine: baseline + 2°C/min * 10; battery: baseline - 0.1V per 5 min * 2
         assert modified.engine_temp_celsius == AMBULANCE["engine_temp_celsius"] + 20.0
-        assert modified.battery_voltage == pytest.approx(
-            AMBULANCE["battery_voltage"] - 0.2
-        )
+        assert modified.battery_voltage == pytest.approx(AMBULANCE["battery_voltage"] - 0.2)
 
     def test_telemetry_immutability(
         self, injector: FailureInjector, sample_telemetry: VehicleTelemetry
