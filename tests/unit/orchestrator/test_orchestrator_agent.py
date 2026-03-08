@@ -270,6 +270,21 @@ class TestOrchestratorEmergencyProcessing:
         assert stored.status == EmergencyStatus.DISPATCHED
 
     @pytest.mark.asyncio
+    async def test_on_scene_status_transitions_emergency_to_in_progress(
+        self, orch_with_ambulance: OrchestratorAgent
+    ) -> None:
+        """Telemetry ON_SCENE should mark a dispatched emergency as in progress."""
+        emergency = _make_emergency()
+        await orch_with_ambulance.process_emergency(emergency)
+
+        msg = _make_telemetry_message("AMB-001")
+        msg.operational_status = OperationalStatus.ON_SCENE.value
+        await orch_with_ambulance._handle_telemetry(msg)
+
+        stored = orch_with_ambulance.emergencies[emergency.emergency_id]
+        assert stored.status == EmergencyStatus.IN_PROGRESS
+
+    @pytest.mark.asyncio
     async def test_emergency_status_is_dispatching_when_no_units(self) -> None:
         """Emergency status should be DISPATCHING if no units were available."""
         orch = _make_orchestrator()

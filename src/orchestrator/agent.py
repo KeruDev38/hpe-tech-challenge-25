@@ -9,6 +9,7 @@ emergency dispatch.
 import asyncio
 import json
 from collections.abc import Callable, Coroutine
+from datetime import datetime
 from typing import Any
 
 import structlog
@@ -25,7 +26,11 @@ from src.models.events import VehicleRegistrationEvent
 from src.models.telemetry import VehicleTelemetry
 from src.orchestrator.emergency_service import EmergencyService
 from src.orchestrator.fleet_service import FleetService
-from src.orchestrator.persistence import DatabaseAlertPersister, DatabaseTelemetryPersister
+from src.orchestrator.persistence import (
+    DatabaseAlertPersister,
+    DatabaseEmergencyAnalyticsPersister,
+    DatabaseTelemetryPersister,
+)
 from src.storage.database import db
 from src.storage.repositories import TelemetryRepository
 
@@ -38,6 +43,7 @@ ALERTS_CLEARED_PATTERN = "aegis:*:alerts_cleared:*"
 EMERGENCY_CHANNEL = "aegis:emergencies:new"
 VEHICLE_REGISTER_PATTERN = "aegis:*:vehicles:register"
 DISPATCH_CHANNEL_PREFIX = "aegis:dispatch"
+DISPATCH_ACK_PATTERN = "aegis:dispatch:*:ack"
 
 # How often the background sweeper runs (seconds).
 SWEEPER_INTERVAL_SECONDS = 30.0
@@ -99,10 +105,10 @@ class OrchestratorAgent:
         # Optional callback for WebSocket broadcasting (injected by api.py)
         self._ws_broadcast = ws_broadcast_callback
 
-        self.fleet_service = FleetService()
+        self.fleet_service = FleetService(clock=self._clock)
         self.fleet = self.fleet_service.fleet
 
-        self.emergency_service = EmergencyService(self.fleet)
+        self.emergency_service = EmergencyService(self.fleet, clock=self._clock)
 
         self.emergencies = self.emergency_service.emergencies
         self.dispatches = self.emergency_service.dispatches
@@ -118,7 +124,16 @@ class OrchestratorAgent:
 
         self._telemetry_sink = telemetry_sink or DatabaseTelemetryPersister(batch_size=10)
         self._alert_sink = alert_sink or DatabaseAlertPersister()
+        self._analytics_sink = DatabaseEmergencyAnalyticsPersister()
+        self._timeline_events: dict[str, list[dict[str, object]]] = {}
         self.running = False
+        self._dispatch_ack_timeout_seconds = 20.0
+
+    def set_clock(self, clock: Clock) -> None:
+        """Set a shared clock for orchestrator and domain services."""
+        self._clock = clock
+        self.fleet_service._clock = clock
+        self.emergency_service._clock = clock
 
     async def start(self) -> None:
         """Connect to Redis and start background listener task.
@@ -165,6 +180,7 @@ class OrchestratorAgent:
                 ALERTS_CLEARED_PATTERN,
                 EMERGENCY_CHANNEL,
                 VEHICLE_REGISTER_PATTERN,
+                DISPATCH_ACK_PATTERN,
             ):
                 if not self.running:
                     break
@@ -203,6 +219,8 @@ class OrchestratorAgent:
             elif "alerts" in channel:
                 alert = PredictiveAlert.model_validate_json(data)
                 await self._handle_alert(alert)
+            elif ":dispatch:" in channel and channel.endswith(":ack"):
+                await self._handle_dispatch_ack(data)
             else:
                 logger.debug("unhandled_channel", channel=channel)
         except Exception as e:
@@ -244,6 +262,24 @@ class OrchestratorAgent:
                 snap.operational_status = OperationalStatus(telemetry.operational_status)
             except ValueError:
                 pass  # Ignore unknown status strings
+
+        if (
+            snap.operational_status == OperationalStatus.ON_SCENE
+            and snap.current_emergency_id is not None
+            and self.emergency_service.mark_emergency_in_progress(snap.current_emergency_id)
+        ):
+            logger.info(
+                "emergency_in_progress",
+                emergency_id=snap.current_emergency_id,
+                vehicle_id=vehicle_id,
+            )
+
+        if (
+            snap.operational_status == OperationalStatus.ON_SCENE
+            and snap.current_emergency_id is not None
+        ):
+            self._record_unit_arrival(snap.current_emergency_id, vehicle_id)
+            await self._progress_coordination_tasks(snap.current_emergency_id)
 
         logger.debug("telemetry_processed", vehicle_id=vehicle_id)
 
@@ -344,6 +380,67 @@ class OrchestratorAgent:
 
         await self._retry_dispatching_emergencies()
 
+    async def _handle_dispatch_ack(self, raw_data: str) -> None:
+        """Handle dispatch acknowledgment messages from vehicle agents."""
+        try:
+            payload = json.loads(raw_data)
+            emergency_id = payload.get("emergency_id", "")
+            dispatch_id = payload.get("dispatch_id", "")
+            vehicle_id = payload.get("vehicle_id", "")
+            acknowledged_at_raw = payload.get("acknowledged_at")
+        except (json.JSONDecodeError, AttributeError):
+            logger.warning("dispatch_ack_parse_error", raw=raw_data)
+            return
+
+        dispatch = self.dispatches.get(emergency_id)
+        if dispatch is None or dispatch.dispatch_id != dispatch_id:
+            logger.warning(
+                "dispatch_ack_unknown_dispatch",
+                emergency_id=emergency_id,
+                dispatch_id=dispatch_id,
+                vehicle_id=vehicle_id,
+            )
+            return
+
+        unit = next((u for u in dispatch.units if u.vehicle_id == vehicle_id), None)
+        if unit is None:
+            logger.warning(
+                "dispatch_ack_unknown_vehicle",
+                emergency_id=emergency_id,
+                dispatch_id=dispatch_id,
+                vehicle_id=vehicle_id,
+            )
+            return
+
+        unit.acknowledged = True
+        if isinstance(acknowledged_at_raw, str):
+            try:
+                unit.acknowledged_at = datetime.fromisoformat(acknowledged_at_raw)
+            except ValueError:
+                unit.acknowledged_at = self._clock.now()
+        else:
+            unit.acknowledged_at = self._clock.now()
+
+        logger.info(
+            "dispatch_ack_received",
+            emergency_id=emergency_id,
+            dispatch_id=dispatch_id,
+            vehicle_id=vehicle_id,
+            all_acknowledged=dispatch.all_acknowledged,
+        )
+
+        await self._append_timeline_event(
+            emergency_id,
+            phase="dispatch",
+            event_type="unit_acknowledged",
+            payload={
+                "dispatch_id": dispatch_id,
+                "vehicle_id": vehicle_id,
+                "all_acknowledged": dispatch.all_acknowledged,
+            },
+        )
+        await self._persist_emergency_snapshot(emergency_id)
+
     async def _retry_dispatching_emergencies(self) -> None:
         """Attempt to dispatch emergencies that previously had no available units.
 
@@ -359,25 +456,125 @@ class OrchestratorAgent:
             )
             await self.process_emergency(emergency)
 
+    def _record_unit_arrival(self, emergency_id: str, vehicle_id: str) -> None:
+        """Capture actual arrival timestamp and ETA error for one dispatched unit."""
+        dispatch = self.dispatches.get(emergency_id)
+        if dispatch is None:
+            return
+
+        unit = next((u for u in dispatch.units if u.vehicle_id == vehicle_id), None)
+        if unit is None or unit.actual_arrival_at is not None:
+            return
+
+        arrived_at = self._clock.now()
+        unit.actual_arrival_at = arrived_at
+
+        if dispatch.dispatched_at is not None:
+            actual_eta_minutes = (arrived_at - dispatch.dispatched_at).total_seconds() / 60.0
+            if unit.estimated_eta_minutes is not None:
+                unit.eta_error_minutes = round(actual_eta_minutes - unit.estimated_eta_minutes, 2)
+
+        logger.info(
+            "unit_arrival_recorded",
+            emergency_id=emergency_id,
+            vehicle_id=vehicle_id,
+            actual_arrival_at=arrived_at.isoformat(),
+            eta_error_minutes=unit.eta_error_minutes,
+        )
+
+        asyncio.create_task(
+            self._append_timeline_event(
+                emergency_id,
+                phase="response",
+                event_type="unit_arrived",
+                payload={
+                    "vehicle_id": vehicle_id,
+                    "actual_arrival_at": arrived_at.isoformat(),
+                    "eta_error_minutes": unit.eta_error_minutes,
+                },
+            )
+        )
+        asyncio.create_task(self._persist_emergency_snapshot(emergency_id))
+
+    async def _progress_coordination_tasks(self, emergency_id: str) -> None:
+        """Advance emergency coordination stages once units are on scene."""
+        emergency = self.emergencies.get(emergency_id)
+        if emergency is None:
+            return
+
+        pending = [task for task, done in emergency.coordination_status.items() if not done]
+        if not pending:
+            if self.emergency_service.all_coordination_tasks_completed(emergency_id):
+                await self.resolve_emergency(emergency_id)
+            return
+
+        dispatch = self.dispatches.get(emergency_id)
+        if dispatch is None:
+            return
+
+        arrived_units = sum(1 for u in dispatch.units if u.actual_arrival_at is not None)
+        required_threshold = max(1, min(len(dispatch.units), len(emergency.coordination_status)))
+        completion_ratio = arrived_units / required_threshold
+
+        if completion_ratio < 1.0:
+            return
+
+        task = pending[0]
+        if self.emergency_service.mark_coordination_task_complete(emergency_id, task):
+            logger.info(
+                "coordination_task_completed",
+                emergency_id=emergency_id,
+                task=task,
+            )
+            await self._append_timeline_event(
+                emergency_id,
+                phase="coordination",
+                event_type="task_completed",
+                payload={"task": task},
+            )
+            await self._persist_emergency_snapshot(emergency_id)
+
+        if self.emergency_service.all_coordination_tasks_completed(emergency_id):
+            await self.resolve_emergency(emergency_id)
+
     async def _emergency_sweeper(self) -> None:
-        """Background task that periodically cancels or dismisses stale emergencies.
+        """Background task that handles emergency lifecycle timing rules.
 
         - DISPATCHING emergencies older than EMERGENCY_DISPATCH_TIMEOUT_MINUTES
           are cancelled (no units ever became available in time).
-        - DISPATCHED/IN_PROGRESS emergencies older than
-          EMERGENCY_MAX_DURATION_MINUTES are auto-dismissed.
+        - IN_PROGRESS emergencies that reach planned duration are auto-resolved.
+        - DISPATCHED/IN_PROGRESS emergencies that exceed hard limits are auto-dismissed.
         """
         while self.running:
             try:
                 await self._clock.sleep(SWEEPER_INTERVAL_SECONDS)
 
-                to_cancel, to_dismiss = self.emergency_service.evaluate_stale_emergencies()
+                to_cancel, to_auto_resolve, to_dismiss = (
+                    self.emergency_service.evaluate_stale_emergencies()
+                )
 
                 for emergency in to_cancel:
                     logger.warning(
                         "emergency_cancelled_no_units",
                         emergency_id=emergency.emergency_id,
                     )
+
+                for emergency in to_auto_resolve:
+                    try:
+                        eta = self.emergency_service.expected_resolution_eta(emergency.emergency_id)
+                        eta_str = None if eta is None else str(eta)
+                        await self.resolve_emergency(emergency.emergency_id)
+                        logger.info(
+                            "emergency_auto_resolved",
+                            emergency_id=emergency.emergency_id,
+                            expected_eta=eta_str,
+                        )
+                    except Exception as exc:
+                        logger.error(
+                            "auto_resolve_failed",
+                            emergency_id=emergency.emergency_id,
+                            error=str(exc),
+                        )
 
                 for emergency in to_dismiss:
                     try:
@@ -417,6 +614,17 @@ class OrchestratorAgent:
         # Delegate to domain service
         dispatch = self.emergency_service.process_emergency(emergency)
 
+        await self._append_timeline_event(
+            emergency.emergency_id,
+            phase="dispatch",
+            event_type="emergency_dispatched",
+            payload={
+                "dispatch_id": dispatch.dispatch_id,
+                "assigned_vehicles": dispatch.vehicle_ids,
+            },
+        )
+        await self._persist_emergency_snapshot(emergency.emergency_id)
+
         if not dispatch.units:
             logger.warning(
                 "no_units_available",
@@ -434,6 +642,8 @@ class OrchestratorAgent:
                     "emergency_type": emergency.emergency_type.value,
                     "location": emergency.location.model_dump(mode="json"),
                     "dispatch_id": dispatch.dispatch_id,
+                    "role": unit.role,
+                    "estimated_eta_minutes": unit.estimated_eta_minutes,
                 }
                 try:
                     await self._bus.publish(channel, json.dumps(payload))
@@ -456,6 +666,14 @@ class OrchestratorAgent:
             except Exception as e:
                 logger.error("broadcast_failed", emergency_id=emergency.emergency_id, error=str(e))
 
+            for unit in dispatch.units:
+                asyncio.create_task(
+                    self._watch_dispatch_ack(
+                        dispatch.dispatch_id, emergency.emergency_id, unit.vehicle_id
+                    ),
+                    name=f"ack-watch-{dispatch.dispatch_id}-{unit.vehicle_id}",
+                )
+
         logger.info(
             "emergency_processed",
             emergency_id=emergency.emergency_id,
@@ -465,6 +683,31 @@ class OrchestratorAgent:
         )
 
         return dispatch
+
+    async def _watch_dispatch_ack(
+        self,
+        dispatch_id: str,
+        emergency_id: str,
+        vehicle_id: str,
+    ) -> None:
+        """Emit an SLA warning when a unit does not acknowledge dispatch in time."""
+        await self._clock.sleep(self._dispatch_ack_timeout_seconds)
+
+        dispatch = self.dispatches.get(emergency_id)
+        if dispatch is None or dispatch.dispatch_id != dispatch_id:
+            return
+
+        unit = next((u for u in dispatch.units if u.vehicle_id == vehicle_id), None)
+        if unit is None or unit.acknowledged:
+            return
+
+        logger.warning(
+            "dispatch_ack_timeout",
+            dispatch_id=dispatch_id,
+            emergency_id=emergency_id,
+            vehicle_id=vehicle_id,
+            timeout_seconds=self._dispatch_ack_timeout_seconds,
+        )
 
     async def resolve_emergency(self, emergency_id: str) -> list[str]:
         """Mark an emergency as resolved and release its units back to IDLE.
@@ -479,6 +722,14 @@ class OrchestratorAgent:
             KeyError: If the emergency_id is not found.
         """
         released = self.emergency_service.resolve_emergency(emergency_id)
+
+        await self._append_timeline_event(
+            emergency_id,
+            phase="closure",
+            event_type="emergency_resolved",
+            payload={"released_vehicles": released},
+        )
+        await self._persist_emergency_snapshot(emergency_id)
 
         # Publish resolution broadcast
         if self.running:
@@ -557,9 +808,18 @@ class OrchestratorAgent:
                     },
                 )
             )
+
     async def dismiss_emergency(self, emergency_id: str) -> list[str]:
         """Mark an emergency as dismissed and release assigned units."""
         released = self.emergency_service.dismiss_emergency(emergency_id)
+
+        await self._append_timeline_event(
+            emergency_id,
+            phase="closure",
+            event_type="emergency_dismissed",
+            payload={"released_vehicles": released},
+        )
+        await self._persist_emergency_snapshot(emergency_id)
 
         if self.running:
             channel = f"{DISPATCH_CHANNEL_PREFIX}:{emergency_id}:dismissed"
@@ -579,6 +839,42 @@ class OrchestratorAgent:
             released_vehicles=released,
         )
         return released
+
+    async def _append_timeline_event(
+        self,
+        emergency_id: str,
+        phase: str,
+        event_type: str,
+        payload: dict[str, object],
+    ) -> None:
+        """Append timeline event in memory and persist asynchronously."""
+        now = self._clock.now()
+        event = {
+            "phase": phase,
+            "event_type": event_type,
+            "timestamp": now.isoformat(),
+            "payload": payload,
+        }
+        self._timeline_events.setdefault(emergency_id, []).append(event)
+        await self._analytics_sink.append_timeline_event(
+            emergency_id=emergency_id,
+            phase=phase,
+            event_type=event_type,
+            event_ts=now,
+            payload=payload,
+        )
+
+    async def _persist_emergency_snapshot(self, emergency_id: str) -> None:
+        """Persist emergency analytics snapshot for dashboard trends."""
+        emergency = self.emergencies.get(emergency_id)
+        dispatch = self.dispatches.get(emergency_id)
+        if emergency is None or dispatch is None:
+            return
+        await self._analytics_sink.persist_dispatch_snapshot(emergency, dispatch)
+
+    def get_timeline(self, emergency_id: str) -> list[dict[str, object]]:
+        """Return in-memory timeline events for an emergency."""
+        return list(self._timeline_events.get(emergency_id, []))
 
     def get_fleet_summary(self) -> dict:
         """Return a summary of the current fleet state.

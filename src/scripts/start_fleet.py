@@ -9,7 +9,6 @@ run in the same asyncio event loop and share a single Redis connection pool.
 import asyncio
 import random
 import sys
-from typing import Literal
 
 import click
 import structlog
@@ -63,9 +62,10 @@ def _build_configs(
     redis_password: str | None,
     telemetry_frequency: float,
     jitter_km: float,
-    navigator_provider: Literal["geometric", "osmnx"] = "geometric",
+    failure_rate_per_hour: float = 0.3,
+    navigator_provider: str = "geometric",
     osmnx_place_name: str = "San Francisco, California, USA",
-    osmnx_network_type: Literal["drive", "walk", "bike", "all"] = "drive",
+    osmnx_network_type: str = "drive",
 ) -> list[AgentConfig]:
     """Build AgentConfig instances for *count* vehicles of *vehicle_type*.
 
@@ -103,6 +103,7 @@ def _build_configs(
                 redis_port=redis_port,
                 redis_password=redis_password,
                 telemetry_frequency_hz=telemetry_frequency,
+                failure_rate_per_hour=failure_rate_per_hour,
                 navigator_provider=navigator_provider,
                 osmnx_place_name=osmnx_place_name,
                 osmnx_network_type=osmnx_network_type,
@@ -198,6 +199,13 @@ def _build_vehicle_agents(configs: list[AgentConfig]) -> list[VehicleAgent]:
     help="Telemetry generation frequency in Hz for all agents.",
 )
 @click.option(
+    "--failure-rate-per-hour",
+    default=0.3,
+    type=float,
+    show_default=True,
+    help="Average injected failures per vehicle per hour.",
+)
+@click.option(
     "--jitter-km",
     default=5.0,
     type=float,
@@ -233,6 +241,7 @@ def main(
     redis_port: int,
     redis_password: str | None,
     telemetry_frequency: float,
+    failure_rate_per_hour: float,
     jitter_km: float,
     navigator_provider: str,
     osmnx_place_name: str,
@@ -283,6 +292,7 @@ def main(
                     redis_port=redis_port,
                     redis_password=redis_password,
                     telemetry_frequency=telemetry_frequency,
+                    failure_rate_per_hour=failure_rate_per_hour,
                     jitter_km=jitter_km,
                     navigator_provider=navigator_provider.lower(),
                     osmnx_place_name=osmnx_place_name,
@@ -300,6 +310,7 @@ def main(
     click.echo(f"   Police      : {police}")
     click.echo(f"   Total       : {total} vehicles")
     click.echo(f"   Frequency   : {telemetry_frequency} Hz")
+    click.echo(f"   Failures/h  : {failure_rate_per_hour}")
     click.echo(f"   Navigator   : {navigator_provider.lower()}")
     click.echo()
     click.echo("Press Ctrl+C to stop")
