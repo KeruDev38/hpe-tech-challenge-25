@@ -36,6 +36,7 @@ from src.orchestrator.agent import OrchestratorAgent
 from src.orchestrator.emergency_prediction_generator import EmergencyGenerator
 from src.orchestrator.historical_injector import HistoricalCrimeInjector
 from src.storage.database import db
+from src.storage.repositories import EmergencyAnalyticsRepository
 
 logger = structlog.get_logger(__name__)
 
@@ -427,6 +428,119 @@ def create_app(orchestrator: OrchestratorAgent) -> FastAPI:
             raise HTTPException(status_code=404, detail="Emergency not found")
         dispatch = orchestrator.dispatches.get(emergency_id)
         return _emergency_to_dict(emergency, dispatch)
+
+    @app.get("/emergencies/{emergency_id}/timeline", tags=["emergencies"])
+    async def get_emergency_timeline(emergency_id: str) -> dict[str, Any]:
+        """Get ordered phase transitions and task events for one emergency."""
+        emergency = orchestrator.emergencies.get(emergency_id)
+        if not emergency:
+            raise HTTPException(status_code=404, detail="Emergency not found")
+
+        timeline = orchestrator.get_timeline(emergency_id)
+        if db.engine is not None:
+            try:
+                async with db.session() as session:
+                    repo = EmergencyAnalyticsRepository(session)
+                    rows = await repo.get_timeline(emergency_id)
+                if rows:
+                    timeline = [
+                        {
+                            "phase": row.phase,
+                            "event_type": row.event_type,
+                            "timestamp": row.event_ts.isoformat(),
+                            "payload": row.payload_json or {},
+                        }
+                        for row in rows
+                    ]
+            except Exception:
+                pass
+
+        return {
+            "emergency_id": emergency_id,
+            "status": emergency.status.value,
+            "timeline": timeline,
+            "coordination_status": emergency.coordination_status,
+        }
+
+    @app.get("/analytics/emergencies/trends", tags=["analytics"])
+    async def get_emergency_trends() -> dict[str, Any]:
+        """Get aggregate emergency analytics for trend charts."""
+        if db.engine is not None:
+            try:
+                async with db.session() as session:
+                    repo = EmergencyAnalyticsRepository(session)
+                    trends = await repo.get_trends()
+                return trends
+            except Exception:
+                pass
+
+        emergencies = list(orchestrator.emergencies.values())
+        dispatches = list(orchestrator.dispatches.values())
+
+        counts_by_status: dict[str, int] = {}
+        counts_by_type: dict[str, int] = {}
+        for emergency in emergencies:
+            counts_by_status[emergency.status.value] = (
+                counts_by_status.get(emergency.status.value, 0) + 1
+            )
+            counts_by_type[emergency.emergency_type.value] = (
+                counts_by_type.get(emergency.emergency_type.value, 0) + 1
+            )
+
+        estimated_etas = [
+            unit.estimated_eta_minutes
+            for dispatch in dispatches
+            for unit in dispatch.units
+            if unit.estimated_eta_minutes is not None
+        ]
+        actual_etas = [
+            (unit.actual_arrival_at - dispatch.dispatched_at).total_seconds() / 60.0
+            for dispatch in dispatches
+            for unit in dispatch.units
+            if unit.actual_arrival_at is not None and dispatch.dispatched_at is not None
+        ]
+        eta_errors = [
+            unit.eta_error_minutes
+            for dispatch in dispatches
+            for unit in dispatch.units
+            if unit.eta_error_minutes is not None
+        ]
+
+        def _avg(values: list[float]) -> float | None:
+            return (sum(values) / len(values)) if values else None
+
+        return {
+            "counts_by_status": [
+                {"status": status, "count": count}
+                for status, count in sorted(counts_by_status.items(), key=lambda item: item[0])
+            ],
+            "counts_by_type": [
+                {"emergency_type": emergency_type, "count": count}
+                for emergency_type, count in sorted(
+                    counts_by_type.items(), key=lambda item: item[0]
+                )
+            ],
+            "averages": {
+                "estimated_eta_minutes": _avg(estimated_etas),
+                "actual_eta_minutes": _avg(actual_etas),
+                "eta_error_minutes": _avg(eta_errors),
+                "assigned_units": _avg([float(len(dispatch.units)) for dispatch in dispatches]),
+                "acknowledged_units": _avg(
+                    [
+                        float(sum(1 for unit in dispatch.units if unit.acknowledged))
+                        for dispatch in dispatches
+                    ]
+                ),
+                "arrived_units": _avg(
+                    [
+                        float(
+                            sum(1 for unit in dispatch.units if unit.actual_arrival_at is not None)
+                        )
+                        for dispatch in dispatches
+                    ]
+                ),
+            },
+        }
 
     @app.post("/emergencies/{emergency_id}/resolve", tags=["emergencies"])
     async def resolve_emergency(emergency_id: str) -> dict[str, Any]:

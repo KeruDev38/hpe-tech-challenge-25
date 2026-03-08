@@ -26,7 +26,11 @@ from src.models.events import VehicleRegistrationEvent
 from src.models.telemetry import VehicleTelemetry
 from src.orchestrator.emergency_service import EmergencyService
 from src.orchestrator.fleet_service import FleetService
-from src.orchestrator.persistence import DatabaseAlertPersister, DatabaseTelemetryPersister
+from src.orchestrator.persistence import (
+    DatabaseAlertPersister,
+    DatabaseEmergencyAnalyticsPersister,
+    DatabaseTelemetryPersister,
+)
 from src.storage.database import db
 from src.storage.repositories import TelemetryRepository
 
@@ -120,6 +124,8 @@ class OrchestratorAgent:
 
         self._telemetry_sink = telemetry_sink or DatabaseTelemetryPersister(batch_size=10)
         self._alert_sink = alert_sink or DatabaseAlertPersister()
+        self._analytics_sink = DatabaseEmergencyAnalyticsPersister()
+        self._timeline_events: dict[str, list[dict[str, object]]] = {}
         self.running = False
         self._dispatch_ack_timeout_seconds = 20.0
 
@@ -417,6 +423,18 @@ class OrchestratorAgent:
             all_acknowledged=dispatch.all_acknowledged,
         )
 
+        await self._append_timeline_event(
+            emergency_id,
+            phase="dispatch",
+            event_type="unit_acknowledged",
+            payload={
+                "dispatch_id": dispatch_id,
+                "vehicle_id": vehicle_id,
+                "all_acknowledged": dispatch.all_acknowledged,
+            },
+        )
+        await self._persist_emergency_snapshot(emergency_id)
+
     async def _retry_dispatching_emergencies(self) -> None:
         """Attempt to dispatch emergencies that previously had no available units.
 
@@ -458,6 +476,20 @@ class OrchestratorAgent:
             eta_error_minutes=unit.eta_error_minutes,
         )
 
+        asyncio.create_task(
+            self._append_timeline_event(
+                emergency_id,
+                phase="response",
+                event_type="unit_arrived",
+                payload={
+                    "vehicle_id": vehicle_id,
+                    "actual_arrival_at": arrived_at.isoformat(),
+                    "eta_error_minutes": unit.eta_error_minutes,
+                },
+            )
+        )
+        asyncio.create_task(self._persist_emergency_snapshot(emergency_id))
+
     async def _progress_coordination_tasks(self, emergency_id: str) -> None:
         """Advance emergency coordination stages once units are on scene."""
         emergency = self.emergencies.get(emergency_id)
@@ -488,6 +520,13 @@ class OrchestratorAgent:
                 emergency_id=emergency_id,
                 task=task,
             )
+            await self._append_timeline_event(
+                emergency_id,
+                phase="coordination",
+                event_type="task_completed",
+                payload={"task": task},
+            )
+            await self._persist_emergency_snapshot(emergency_id)
 
         if self.emergency_service.all_coordination_tasks_completed(emergency_id):
             await self.resolve_emergency(emergency_id)
@@ -568,6 +607,17 @@ class OrchestratorAgent:
         """
         # Delegate to domain service
         dispatch = self.emergency_service.process_emergency(emergency)
+
+        await self._append_timeline_event(
+            emergency.emergency_id,
+            phase="dispatch",
+            event_type="emergency_dispatched",
+            payload={
+                "dispatch_id": dispatch.dispatch_id,
+                "assigned_vehicles": dispatch.vehicle_ids,
+            },
+        )
+        await self._persist_emergency_snapshot(emergency.emergency_id)
 
         if not dispatch.units:
             logger.warning(
@@ -667,6 +717,14 @@ class OrchestratorAgent:
         """
         released = self.emergency_service.resolve_emergency(emergency_id)
 
+        await self._append_timeline_event(
+            emergency_id,
+            phase="closure",
+            event_type="emergency_resolved",
+            payload={"released_vehicles": released},
+        )
+        await self._persist_emergency_snapshot(emergency_id)
+
         # Publish resolution broadcast
         if self.running:
             channel = f"{DISPATCH_CHANNEL_PREFIX}:{emergency_id}:resolved"
@@ -749,6 +807,14 @@ class OrchestratorAgent:
         """Mark an emergency as dismissed and release assigned units."""
         released = self.emergency_service.dismiss_emergency(emergency_id)
 
+        await self._append_timeline_event(
+            emergency_id,
+            phase="closure",
+            event_type="emergency_dismissed",
+            payload={"released_vehicles": released},
+        )
+        await self._persist_emergency_snapshot(emergency_id)
+
         if self.running:
             channel = f"{DISPATCH_CHANNEL_PREFIX}:{emergency_id}:dismissed"
             payload = {
@@ -767,6 +833,42 @@ class OrchestratorAgent:
             released_vehicles=released,
         )
         return released
+
+    async def _append_timeline_event(
+        self,
+        emergency_id: str,
+        phase: str,
+        event_type: str,
+        payload: dict[str, object],
+    ) -> None:
+        """Append timeline event in memory and persist asynchronously."""
+        now = self._clock.now()
+        event = {
+            "phase": phase,
+            "event_type": event_type,
+            "timestamp": now.isoformat(),
+            "payload": payload,
+        }
+        self._timeline_events.setdefault(emergency_id, []).append(event)
+        await self._analytics_sink.append_timeline_event(
+            emergency_id=emergency_id,
+            phase=phase,
+            event_type=event_type,
+            event_ts=now,
+            payload=payload,
+        )
+
+    async def _persist_emergency_snapshot(self, emergency_id: str) -> None:
+        """Persist emergency analytics snapshot for dashboard trends."""
+        emergency = self.emergencies.get(emergency_id)
+        dispatch = self.dispatches.get(emergency_id)
+        if emergency is None or dispatch is None:
+            return
+        await self._analytics_sink.persist_dispatch_snapshot(emergency, dispatch)
+
+    def get_timeline(self, emergency_id: str) -> list[dict[str, object]]:
+        """Return in-memory timeline events for an emergency."""
+        return list(self._timeline_events.get(emergency_id, []))
 
     def get_fleet_summary(self) -> dict:
         """Return a summary of the current fleet state.

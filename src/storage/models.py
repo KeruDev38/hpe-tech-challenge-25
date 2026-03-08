@@ -165,3 +165,66 @@ class AlertRecord(Base):
         Index("idx_alerts_severity", "severity", postgresql_using="btree"),
         Index("idx_alerts_status", "status", postgresql_using="btree"),
     )
+
+
+class EmergencyAnalyticsRecord(Base):
+    """Denormalized emergency analytics snapshot for dashboard trend charts."""
+
+    __tablename__ = "emergency_analytics"
+
+    emergency_id: Mapped[str] = mapped_column(String(100), primary_key=True)
+    emergency_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    severity: Mapped[int] = mapped_column(nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    dispatched_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    dismissed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    assigned_units: Mapped[int] = mapped_column(nullable=False, default=0)
+    acknowledged_units: Mapped[int] = mapped_column(nullable=False, default=0)
+    arrived_units: Mapped[int] = mapped_column(nullable=False, default=0)
+    avg_estimated_eta_minutes: Mapped[float | None] = mapped_column(Float, nullable=True)
+    avg_actual_eta_minutes: Mapped[float | None] = mapped_column(Float, nullable=True)
+    avg_eta_error_minutes: Mapped[float | None] = mapped_column(Float, nullable=True)
+    coordination_status: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+    __table_args__ = (
+        Index("idx_emergency_analytics_status", "status", postgresql_using="btree"),
+        Index("idx_emergency_analytics_type", "emergency_type", postgresql_using="btree"),
+        Index("idx_emergency_analytics_dispatched", "dispatched_at", postgresql_using="btree"),
+    )
+
+
+class EmergencyTimelineRecord(Base):
+    """Append-only emergency timeline events with phase transitions."""
+
+    __tablename__ = "emergency_timeline"
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    emergency_id: Mapped[str] = mapped_column(String(100), nullable=False)
+    phase: Mapped[str] = mapped_column(String(30), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(60), nullable=False)
+    event_ts: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    payload_json: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+    __table_args__ = (
+        Index("idx_emergency_timeline_emergency", "emergency_id", postgresql_using="btree"),
+        Index("idx_emergency_timeline_event_ts", "event_ts", postgresql_using="btree"),
+        Index(
+            "idx_emergency_timeline_emergency_ts",
+            "emergency_id",
+            "event_ts",
+            postgresql_using="btree",
+        ),
+    )

@@ -3,14 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 
 import structlog
 
 from src.core.persistence import AlertSink, TelemetrySink
 from src.models.alerts import PredictiveAlert
+from src.models.dispatch import Dispatch
+from src.models.emergency import Emergency
 from src.models.telemetry import VehicleTelemetry
 from src.storage.database import db
-from src.storage.repositories import AlertRepository, TelemetryRepository
+from src.storage.repositories import (
+    AlertRepository,
+    EmergencyAnalyticsRepository,
+    TelemetryRepository,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -66,3 +73,59 @@ class DatabaseAlertPersister(AlertSink):
                 await repo.save_alert(alert, vehicle_id)
         except Exception as exc:
             logger.error("db_persist_alert_error", vehicle_id=vehicle_id, error=str(exc))
+
+
+class DatabaseEmergencyAnalyticsPersister:
+    """Persists emergency dispatch/timeline analytics into PostgreSQL."""
+
+    async def persist_dispatch_snapshot(self, emergency: Emergency, dispatch: Dispatch) -> None:
+        if db.engine is None:
+            return
+        try:
+            async with db.session() as session:
+                repo = EmergencyAnalyticsRepository(session)
+                await repo.upsert_dispatch_snapshot(
+                    emergency_id=emergency.emergency_id,
+                    emergency_type=emergency.emergency_type.value,
+                    severity=emergency.severity.value,
+                    status=emergency.status.value,
+                    dispatch=dispatch,
+                    coordination_status=emergency.coordination_status,
+                    resolved_at=emergency.resolved_at,
+                    dismissed_at=emergency.dismissed_at,
+                )
+        except Exception as exc:
+            logger.error(
+                "db_persist_emergency_snapshot_error",
+                emergency_id=emergency.emergency_id,
+                error=str(exc),
+            )
+
+    async def append_timeline_event(
+        self,
+        emergency_id: str,
+        phase: str,
+        event_type: str,
+        event_ts: datetime,
+        payload: dict[str, object],
+    ) -> None:
+        if db.engine is None:
+            return
+        try:
+            async with db.session() as session:
+                repo = EmergencyAnalyticsRepository(session)
+                await repo.append_timeline_event(
+                    emergency_id=emergency_id,
+                    phase=phase,
+                    event_type=event_type,
+                    event_ts=event_ts,
+                    payload=payload,
+                )
+        except Exception as exc:
+            logger.error(
+                "db_append_timeline_event_error",
+                emergency_id=emergency_id,
+                phase=phase,
+                event_type=event_type,
+                error=str(exc),
+            )
