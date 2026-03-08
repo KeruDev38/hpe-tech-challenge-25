@@ -17,7 +17,7 @@ from src.core.messaging import BusMessage, MessageBus
 from src.core.persistence import AlertSink, TelemetrySink
 from src.core.time import Clock, RealClock
 from src.infrastructure.redis_bus import RedisMessageBus
-from src.models.alerts import PredictiveAlert
+from src.models.alerts import CrimePrediction, PredictiveAlert
 from src.models.dispatch import Dispatch
 from src.models.emergency import Emergency, EmergencyStatus
 from src.models.enums import OperationalStatus
@@ -107,6 +107,7 @@ class OrchestratorAgent:
         self.emergencies = self.emergency_service.emergencies
         self.dispatches = self.emergency_service.dispatches
         self.active_alerts = self.fleet_service.active_alerts
+        self.active_crime_predictions: dict[str, CrimePrediction] = {}
 
         self._bus = message_bus or RedisMessageBus(
             host=self._redis_host,
@@ -498,6 +499,64 @@ class OrchestratorAgent:
             released_vehicles=released,
         )
         return released
+
+    async def process_crime_prediction(self, prediction: CrimePrediction) -> None:
+        """Store and broadcast an AI crime prediction (non-dispatching event)."""
+        self.active_crime_predictions[prediction.prediction_id] = prediction
+
+        logger.info(
+            "crime_prediction_processed",
+            prediction_id=prediction.prediction_id,
+            neighborhood=prediction.neighborhood,
+            risk_probability=prediction.risk_probability,
+            severity=prediction.severity.value,
+        )
+
+        if self._ws_broadcast is not None:
+            asyncio.create_task(
+                self._ws_broadcast(
+                    "prediction.created",
+                    {
+                        "prediction_id": prediction.prediction_id,
+                        "neighborhood": prediction.neighborhood,
+                        "timestamp": prediction.timestamp.isoformat(),
+                        "risk_probability": prediction.risk_probability,
+                        "confidence": prediction.confidence,
+                        "severity": prediction.severity.value,
+                        "latitude": prediction.latitude,
+                        "longitude": prediction.longitude,
+                        "predicted_crime_type": prediction.predicted_crime_type,
+                        "description": prediction.description,
+                        "source": prediction.source,
+                    },
+                )
+            )
+
+    async def resolve_crime_prediction(self, prediction_id: str) -> None:
+        """Resolve and remove an existing AI crime prediction."""
+        prediction = self.active_crime_predictions.pop(prediction_id, None)
+        if prediction is None:
+            logger.warning("crime_prediction_not_found", prediction_id=prediction_id)
+            return
+
+        logger.info(
+            "crime_prediction_resolved",
+            prediction_id=prediction_id,
+            neighborhood=prediction.neighborhood,
+        )
+
+        if self._ws_broadcast is not None:
+            asyncio.create_task(
+                self._ws_broadcast(
+                    "prediction.resolved",
+                    {
+                        "prediction_id": prediction.prediction_id,
+                        "neighborhood": prediction.neighborhood,
+                        "timestamp": self._clock.now().isoformat(),
+                        "source": prediction.source,
+                    },
+                )
+            )
 
     def get_fleet_summary(self) -> dict:
         """Return a summary of the current fleet state.

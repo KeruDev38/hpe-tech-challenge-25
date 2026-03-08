@@ -80,6 +80,16 @@ def fetch_alerts() -> list | None:
         return None
 
 
+def fetch_crime_predictions() -> list | None:
+    """Fetch active city crime predictions from the orchestrator API."""
+    try:
+        response = requests.get(f"{ORCHESTRATOR_URL}/crime-predictions", timeout=5)
+        response.raise_for_status()
+        return response.json()
+    except Exception:
+        return None
+
+
 def _vehicle_icon(status: str, has_alert: bool) -> tuple[str, str]:
     """Return (color, emoji) for a vehicle marker based on its status.
 
@@ -301,6 +311,42 @@ def _render_alert_panel(alerts: list | None) -> None:
                         col.metric(k.replace("_", " ").title(), str(v))
 
 
+def _render_prediction_panel(predictions: list | None) -> None:
+    """Render active AI crime predictions below predictive maintenance alerts."""
+    st.subheader("AI Crime Predictions")
+    if not predictions:
+        st.info("No active AI crime predictions.")
+        return
+
+    severity_order = {"critical": 0, "warning": 1, "info": 2}
+    sorted_predictions = sorted(
+        predictions,
+        key=lambda item: severity_order.get(item.get("severity", "info"), 3),
+    )
+
+    for prediction in sorted_predictions:
+        sev = prediction.get("severity", "info")
+        badge = _SEVERITY_BADGE.get(sev, "⚪")
+        neighborhood = prediction.get("neighborhood", "Unknown neighborhood")
+        probability = float(prediction.get("risk_probability", 0.0))
+        crime_type = (
+            str(prediction.get("predicted_crime_type", "unknown")).replace("_", " ").title()
+        )
+
+        with st.expander(
+            f"{badge} {neighborhood} — {crime_type} ({probability:.0%})",
+            expanded=(sev == "critical"),
+        ):
+            col_a, col_b, col_c = st.columns(3)
+            col_a.metric("Risk Probability", f"{probability:.0%}")
+            col_b.metric("Confidence", f"{float(prediction.get('confidence', 0.0)):.0%}")
+            col_c.metric("Severity", sev.upper())
+
+            st.write(f"**Description:** {prediction.get('description', 'N/A')}")
+            st.write(f"**Source:** {prediction.get('source', 'ai_crime_predictor')}")
+            st.write(f"**Location:** {prediction.get('latitude')}, {prediction.get('longitude')}")
+
+
 def main() -> None:
     """Main Streamlit application entrypoint."""
     st.title("Project AEGIS - City Operations Dashboard")
@@ -319,6 +365,7 @@ def main() -> None:
     fleet_data = fetch_fleet()
     emergencies = fetch_emergencies()
     alerts = fetch_alerts()
+    predictions = fetch_crime_predictions()
 
     # -----------------------------------------------------------------------
     # Top-level metrics row
@@ -346,7 +393,7 @@ def main() -> None:
     with col_map:
         st.subheader("City Map (Live)")
         sim_time_str = "Waiting for orchestrator..."
-        
+
         if fleet_data and "summary" in fleet_data:
             raw_time = fleet_data["summary"].get("simulated_time")
             if raw_time:
@@ -356,7 +403,7 @@ def main() -> None:
                     sim_time_str = dt.strftime("%A, %B %d - %H:%M")
                 except ValueError:
                     pass
-        
+
         # Display it using a markdown badge
         st.markdown(f"**🕒 Simulated Clock:** `{sim_time_str}`")
         _render_folium_map(
@@ -413,6 +460,7 @@ def main() -> None:
     # ML Predictive Alerts
     # -----------------------------------------------------------------------
     _render_alert_panel(alerts)
+    _render_prediction_panel(predictions)
 
     st.markdown("---")
 

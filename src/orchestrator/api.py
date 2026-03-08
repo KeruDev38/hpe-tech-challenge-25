@@ -168,7 +168,7 @@ def create_app(orchestrator: OrchestratorAgent) -> FastAPI:
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
         db.connect()
-        
+
         # Override the orchestrator's clock if it was initialized with RealClock
         sim_start_time = datetime(2026, 3, 6, 18, 0, tzinfo=UTC)
         shared_clock = FastForwardClock(start_at=sim_start_time)
@@ -177,11 +177,15 @@ def create_app(orchestrator: OrchestratorAgent) -> FastAPI:
         task = asyncio.create_task(_run_orchestrator(orchestrator))
 
         # Start Historical Injector
-        historical_injector = HistoricalCrimeInjector(orchestrator, clock=shared_clock, check_interval_seconds=1800.0)
+        historical_injector = HistoricalCrimeInjector(
+            orchestrator, clock=shared_clock, check_interval_seconds=1800.0
+        )
         hist_task = asyncio.create_task(historical_injector.start())
-        
+
         # Start AI Predictor
-        ai_generator = EmergencyGenerator(orchestrator, clock=shared_clock, check_interval_seconds=1800.0)
+        ai_generator = EmergencyGenerator(
+            orchestrator, clock=shared_clock, check_interval_seconds=1800.0
+        )
         ai_gen_task = asyncio.create_task(ai_generator.start())
 
         # Time Machine Driver: Advances the FastForwardClock 30 mins every 3 real seconds
@@ -192,7 +196,7 @@ def create_app(orchestrator: OrchestratorAgent) -> FastAPI:
             while orchestrator.running:
                 await asyncio.sleep(3.0)
                 shared_clock.advance(1800.0)
-                
+
         clock_task = asyncio.create_task(_drive_clock())
 
         yield
@@ -201,12 +205,12 @@ def create_app(orchestrator: OrchestratorAgent) -> FastAPI:
         orchestrator.running = False
         ai_generator.stop()
         historical_injector.stop()
-        
+
         task.cancel()
         ai_gen_task.cancel()
         hist_task.cancel()
         clock_task.cancel()
-        
+
         await orchestrator.stop()
         await db.disconnect()
 
@@ -316,6 +320,29 @@ def create_app(orchestrator: OrchestratorAgent) -> FastAPI:
                     "related_telemetry": alert.related_telemetry,
                 }
             )
+        return result
+
+    @app.get("/crime-predictions", tags=["fleet"])
+    async def get_crime_predictions() -> list[dict[str, Any]]:
+        """Get all currently active AI crime predictions."""
+        result = []
+        for prediction in orchestrator.active_crime_predictions.values():
+            result.append(
+                {
+                    "prediction_id": prediction.prediction_id,
+                    "neighborhood": prediction.neighborhood,
+                    "timestamp": prediction.timestamp.isoformat(),
+                    "risk_probability": prediction.risk_probability,
+                    "confidence": prediction.confidence,
+                    "severity": prediction.severity.value,
+                    "latitude": prediction.latitude,
+                    "longitude": prediction.longitude,
+                    "predicted_crime_type": prediction.predicted_crime_type,
+                    "description": prediction.description,
+                    "source": prediction.source,
+                }
+            )
+        result.sort(key=lambda item: item["timestamp"], reverse=True)
         return result
 
     # -----------------------------------------------------------------------

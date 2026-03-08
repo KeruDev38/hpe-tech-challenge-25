@@ -1,30 +1,19 @@
-"""
-AI-driven emergency generation system for Project AEGIS.
-
-Provides real-time predictive analytics using the Random Forest crime model,
-while respecting the strict geographical operational boundaries of San Francisco.
-"""
+"""AI-driven city crime prediction generator for Project AEGIS."""
 
 import structlog
 
-from src.models.emergency import (
-    EMERGENCY_UNITS_DEFAULTS,
-    Emergency,
-    EmergencySeverity,
-    EmergencyType,
-    Location,
-    scale_units_by_severity,
-)
-from src.orchestrator.agent import OrchestratorAgent
-from src.ml.predictor import CrimePredictor
-from src.vehicle_agent.config import SF_LAT_MAX, SF_LAT_MIN, SF_LON_MAX, SF_LON_MIN
 from src.core.time import Clock
+from src.ml.predictor import CrimePredictor
+from src.models.alerts import CrimePrediction
+from src.models.enums import AlertSeverity
+from src.orchestrator.agent import OrchestratorAgent
+from src.vehicle_agent.config import SF_LAT_MAX, SF_LAT_MIN, SF_LON_MAX, SF_LON_MIN
 
 logger = structlog.get_logger(__name__)
 
 
 class EmergencyGenerator:
-    """Generates emergencies based on AI predictions across city neighborhoods."""
+    """Generates non-dispatching crime predictions across city neighborhoods."""
 
     def __init__(
         self,
@@ -36,7 +25,7 @@ class EmergencyGenerator:
         self.clock = clock
         self.check_interval_seconds = check_interval_seconds
         self.running = False
-        
+
         self.predictor = CrimePredictor(confidence_threshold=0.90)
         self.active_predictions: dict[str, str] = {}
 
@@ -64,51 +53,55 @@ class EmergencyGenerator:
 
         current_time = self.clock.now()
         recommendations = self.predictor.predict_current_risk(current_time)
-        current_high_risk_neighborhoods = {rec['neighborhood'] for rec in recommendations}
+        current_high_risk_neighborhoods = {rec["neighborhood"] for rec in recommendations}
 
         # Resolve expired predictions
-        expired_neighborhoods = set(self.active_predictions.keys()) - current_high_risk_neighborhoods
+        expired_neighborhoods = (
+            set(self.active_predictions.keys()) - current_high_risk_neighborhoods
+        )
         for hood in expired_neighborhoods:
-            em_id = self.active_predictions[hood]
+            prediction_id = self.active_predictions[hood]
             try:
-                await self.orchestrator.resolve_emergency(em_id)
-                logger.info("ai_prediction_resolved", neighborhood=hood, emergency_id=em_id)
+                await self.orchestrator.resolve_crime_prediction(prediction_id)
+                logger.info(
+                    "ai_prediction_resolved",
+                    neighborhood=hood,
+                    prediction_id=prediction_id,
+                )
             except Exception as e:
                 logger.warning("failed_to_resolve_ai_prediction", error=str(e))
             del self.active_predictions[hood]
 
         # Create new predictions
         for rec in recommendations:
-            neighborhood = rec['neighborhood']
+            neighborhood = rec["neighborhood"]
             if neighborhood in self.active_predictions:
                 continue
 
-            prob = rec['risk_probability']
-            severity = EmergencySeverity.CRITICAL if prob > 0.95 else EmergencySeverity.SEVERE
+            prob = rec["risk_probability"]
+            severity = AlertSeverity.CRITICAL if prob > 0.95 else AlertSeverity.WARNING
 
-            lat = max(SF_LAT_MIN, min(SF_LAT_MAX, rec['latitude']))
-            lon = max(SF_LON_MIN, min(SF_LON_MAX, rec['longitude']))
+            lat = max(SF_LAT_MIN, min(SF_LAT_MAX, rec["latitude"]))
+            lon = max(SF_LON_MIN, min(SF_LON_MAX, rec["longitude"]))
+            sim_time_str = current_time.strftime("%A %H:%M")
+            predicted_crime_type = str(rec["common_crime_type"])
 
-            location = Location(
-                latitude=lat, 
-                longitude=lon, 
-                timestamp=self.clock.now()
-            )
-
-            em_type = EmergencyType.CRIME
-            units_required = scale_units_by_severity(EMERGENCY_UNITS_DEFAULTS[em_type], severity)
-            sim_time_str = current_time.strftime('%A %H:%M')
-
-            emergency = Emergency(
-                emergency_type=em_type,
+            prediction = CrimePrediction(
+                neighborhood=neighborhood,
+                timestamp=self.clock.now(),
+                risk_probability=prob,
+                confidence=prob,
                 severity=severity,
-                location=location,
-                address=neighborhood,
-                description=f"AI Prediction [{sim_time_str}]: High risk of {rec['common_crime_type']} ({prob:.1%} confidence)",
-                units_required=units_required,
-                reported_by="ai_crime_predictor",
+                latitude=lat,
+                longitude=lon,
+                predicted_crime_type=predicted_crime_type,
+                description=(
+                    f"AI Prediction [{sim_time_str}]: High risk of "
+                    f"{predicted_crime_type} ({prob:.1%} confidence)"
+                ),
+                source="ai_crime_predictor",
             )
 
-            logger.info("ai_dispatching_emergency", neighborhood=neighborhood, probability=prob)
-            await self.orchestrator.process_emergency(emergency)
-            self.active_predictions[neighborhood] = emergency.emergency_id
+            logger.info("ai_crime_prediction_created", neighborhood=neighborhood, probability=prob)
+            await self.orchestrator.process_crime_prediction(prediction)
+            self.active_predictions[neighborhood] = prediction.prediction_id
