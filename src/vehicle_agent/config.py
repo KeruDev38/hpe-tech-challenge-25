@@ -95,6 +95,12 @@ class AgentConfig(BaseSettings):
     telemetry_frequency_hz: float = Field(
         default=1.0, ge=0.1, le=10.0, description="Telemetry generation frequency in Hz"
     )
+    failure_rate_per_hour: float = Field(
+        default=0.3,
+        ge=0.0,
+        le=10.0,
+        description="Average number of injected failures per vehicle per hour",
+    )
 
     # Navigation / Routing
     navigator_provider: str = Field(

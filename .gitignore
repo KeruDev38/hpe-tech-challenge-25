@@ -230,3 +230,6 @@ telemetry/
 SKILLS.md
 .agents/
 skills-lock.json
+
+# Models
+src/ml/*.joblib

@@ -6,8 +6,9 @@ The injector reads the vehicle-type-specific baselines from config so that failu
 offsets are applied correctly regardless of vehicle type.
 """
 
-from datetime import UTC, datetime
+from datetime import datetime
 
+from src.core.time import Clock, RealClock
 from src.models.enums import FailureScenario, VehicleType
 from src.models.telemetry import VehicleTelemetry
 from src.vehicle_agent.config import VEHICLE_BASELINES
@@ -16,7 +17,12 @@ from src.vehicle_agent.config import VEHICLE_BASELINES
 class FailureInjector:
     """Injects failure scenarios into vehicle telemetry."""
 
-    def __init__(self, vehicle_type: VehicleType = VehicleType.AMBULANCE) -> None:
+    def __init__(
+        self,
+        vehicle_type: VehicleType = VehicleType.AMBULANCE,
+        *,
+        clock: Clock | None = None,
+    ) -> None:
         """Initialize the failure injector.
 
         Args:
@@ -26,6 +32,7 @@ class FailureInjector:
         """
         self.active_scenarios: dict[FailureScenario, datetime] = {}
         self._baselines = VEHICLE_BASELINES[vehicle_type]
+        self._clock = clock or RealClock()
 
     def activate_scenario(self, scenario: FailureScenario) -> None:
         """
@@ -34,7 +41,7 @@ class FailureInjector:
         Args:
             scenario: The failure scenario to activate
         """
-        self.active_scenarios[scenario] = datetime.now(UTC)
+        self.active_scenarios[scenario] = self._clock.now()
 
     def deactivate_scenario(self, scenario: FailureScenario) -> None:
         """
@@ -57,7 +64,7 @@ class FailureInjector:
         """
         if scenario not in self.active_scenarios:
             return 0.0
-        elapsed = datetime.now(UTC) - self.active_scenarios[scenario]
+        elapsed = self._clock.now() - self.active_scenarios[scenario]
         return elapsed.total_seconds()
 
     def apply_failures(self, telemetry: VehicleTelemetry) -> VehicleTelemetry:

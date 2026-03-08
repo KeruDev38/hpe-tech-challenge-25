@@ -4,8 +4,6 @@ Anomaly detection system for vehicle telemetry.
 Uses rule-based thresholds to detect failures and generate predictive alerts.
 """
 
-from datetime import UTC, datetime
-
 from src.models.alerts import PredictiveAlert
 from src.models.enums import AlertSeverity, FailureCategory
 from src.models.telemetry import VehicleTelemetry
@@ -57,7 +55,7 @@ class AnomalyDetector:
             alerts.append(
                 PredictiveAlert(
                     vehicle_id=self.vehicle_id,
-                    timestamp=datetime.now(UTC),
+                    timestamp=telemetry.timestamp,
                     severity=AlertSeverity.CRITICAL,
                     category=FailureCategory.ENGINE,
                     component="engine",
@@ -81,7 +79,7 @@ class AnomalyDetector:
             alerts.append(
                 PredictiveAlert(
                     vehicle_id=self.vehicle_id,
-                    timestamp=datetime.now(UTC),
+                    timestamp=telemetry.timestamp,
                     severity=AlertSeverity.WARNING,
                     category=FailureCategory.ENGINE,
                     component="engine",
@@ -119,7 +117,7 @@ class AnomalyDetector:
             alerts.append(
                 PredictiveAlert(
                     vehicle_id=self.vehicle_id,
-                    timestamp=datetime.now(UTC),
+                    timestamp=telemetry.timestamp,
                     severity=AlertSeverity.CRITICAL,
                     category=FailureCategory.ELECTRICAL,
                     component="battery",
@@ -143,7 +141,7 @@ class AnomalyDetector:
             alerts.append(
                 PredictiveAlert(
                     vehicle_id=self.vehicle_id,
-                    timestamp=datetime.now(UTC),
+                    timestamp=telemetry.timestamp,
                     severity=AlertSeverity.WARNING,
                     category=FailureCategory.ELECTRICAL,
                     component="battery",
@@ -181,7 +179,7 @@ class AnomalyDetector:
             alerts.append(
                 PredictiveAlert(
                     vehicle_id=self.vehicle_id,
-                    timestamp=datetime.now(UTC),
+                    timestamp=telemetry.timestamp,
                     severity=AlertSeverity.CRITICAL,
                     category=FailureCategory.FUEL,
                     component="fuel",
@@ -205,7 +203,7 @@ class AnomalyDetector:
             alerts.append(
                 PredictiveAlert(
                     vehicle_id=self.vehicle_id,
-                    timestamp=datetime.now(UTC),
+                    timestamp=telemetry.timestamp,
                     severity=AlertSeverity.WARNING,
                     category=FailureCategory.FUEL,
                     component="fuel",
