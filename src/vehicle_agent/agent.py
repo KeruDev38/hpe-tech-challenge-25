@@ -93,10 +93,10 @@ class VehicleAgent:
             db=config.redis_db,
         )
         self.telemetry_generator = SimpleTelemetryGenerator(config, clock=self.clock)
-        self.failure_injector = FailureInjector(vehicle_type=config.vehicle_type)
+        self.failure_injector = FailureInjector(vehicle_type=config.vehicle_type, clock=self.clock)
         self.failure_scheduler = FailureScheduler(
-            failure_rate_per_hour=2.0
-        )  # Average 2 failures per hour
+            failure_rate_per_hour=config.failure_rate_per_hour
+        )
         self.anomaly_detector = Predictor(config.vehicle_id)
         # Rule-based fallback used while the ML window is warming up (first 10 ticks)
         self._rule_detector = AnomalyDetector(config.vehicle_id)

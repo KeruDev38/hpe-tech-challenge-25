@@ -129,6 +129,12 @@ class OrchestratorAgent:
         self.running = False
         self._dispatch_ack_timeout_seconds = 20.0
 
+    def set_clock(self, clock: Clock) -> None:
+        """Set a shared clock for orchestrator and domain services."""
+        self._clock = clock
+        self.fleet_service._clock = clock
+        self.emergency_service._clock = clock
+
     async def start(self) -> None:
         """Connect to Redis and start background listener task.
 

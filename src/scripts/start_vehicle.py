@@ -70,6 +70,13 @@ logger = structlog.get_logger(__name__)
     help="Telemetry generation frequency in Hz (default: 1.0)",
 )
 @click.option(
+    "--failure-rate-per-hour",
+    default=0.3,
+    type=float,
+    show_default=True,
+    help="Average injected failures per vehicle per hour.",
+)
+@click.option(
     "--navigator-provider",
     type=click.Choice(["geometric", "osmnx"], case_sensitive=False),
     default="geometric",
@@ -106,6 +113,7 @@ def main(
     redis_port: int,
     redis_password: str | None,
     telemetry_frequency: float,
+    failure_rate_per_hour: float,
     navigator_provider: str,
     osmnx_place_name: str,
     osmnx_network_type: str,
@@ -144,6 +152,7 @@ def main(
             redis_port=redis_port,
             redis_password=redis_password,
             telemetry_frequency_hz=telemetry_frequency,
+            failure_rate_per_hour=failure_rate_per_hour,
             navigator_provider=navigator_provider.lower(),
             osmnx_place_name=osmnx_place_name,
             osmnx_network_type=osmnx_network_type.lower(),
@@ -170,6 +179,7 @@ def main(
     click.echo(f"   Fleet: {fleet_id}")
     click.echo(f"   Redis: {redis_host}:{redis_port}")
     click.echo(f"   Frequency: {telemetry_frequency} Hz")
+    click.echo(f"   Failure rate: {failure_rate_per_hour}/hour")
     click.echo(f"   Navigator: {navigator_provider.lower()}")
     click.echo(f"   Location: ({latitude:.4f}, {longitude:.4f})")
     click.echo()

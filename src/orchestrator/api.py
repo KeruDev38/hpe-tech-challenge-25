@@ -174,7 +174,7 @@ def create_app(orchestrator: OrchestratorAgent) -> FastAPI:
         # Override the orchestrator's clock if it was initialized with RealClock
         sim_start_time = datetime(2026, 3, 6, 18, 0, tzinfo=UTC)
         shared_clock = FastForwardClock(start_at=sim_start_time)
-        orchestrator._clock = shared_clock
+        orchestrator.set_clock(shared_clock)
 
         task = asyncio.create_task(_run_orchestrator(orchestrator))
 
