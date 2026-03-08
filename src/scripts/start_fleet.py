@@ -9,10 +9,13 @@ run in the same asyncio event loop and share a single Redis connection pool.
 import asyncio
 import random
 import sys
+from typing import Literal
 
 import click
 import structlog
 
+from src.core.time import RealClock
+from src.infrastructure.redis_bus import RedisMessageBus
 from src.models.enums import VehicleType
 from src.vehicle_agent.agent import VehicleAgent
 from src.vehicle_agent.config import AgentConfig
@@ -60,6 +63,9 @@ def _build_configs(
     redis_password: str | None,
     telemetry_frequency: float,
     jitter_km: float,
+    navigator_provider: Literal["geometric", "osmnx"] = "geometric",
+    osmnx_place_name: str = "San Francisco, California, USA",
+    osmnx_network_type: Literal["drive", "walk", "bike", "all"] = "drive",
 ) -> list[AgentConfig]:
     """Build AgentConfig instances for *count* vehicles of *vehicle_type*.
 
@@ -97,6 +103,9 @@ def _build_configs(
                 redis_port=redis_port,
                 redis_password=redis_password,
                 telemetry_frequency_hz=telemetry_frequency,
+                navigator_provider=navigator_provider,
+                osmnx_place_name=osmnx_place_name,
+                osmnx_network_type=osmnx_network_type,
                 initial_latitude=base_lat + lat_offset,
                 initial_longitude=base_lon + lon_offset,
             )
@@ -119,6 +128,20 @@ async def _run_fleet(agents: list[VehicleAgent]) -> None:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def _build_vehicle_agents(configs: list[AgentConfig]) -> list[VehicleAgent]:
+    """Build vehicle agents with explicit dependency wiring."""
+    agents: list[VehicleAgent] = []
+    for cfg in configs:
+        bus = RedisMessageBus(
+            host=cfg.redis_host,
+            port=cfg.redis_port,
+            password=cfg.redis_password,
+            db=cfg.redis_db,
+        )
+        agents.append(VehicleAgent(cfg, message_bus=bus, clock=RealClock()))
+    return agents
 
 
 @click.command()
@@ -181,6 +204,26 @@ async def _run_fleet(agents: list[VehicleAgent]) -> None:
     show_default=True,
     help="Maximum random positional spread (km) around the default start location.",
 )
+@click.option(
+    "--navigator-provider",
+    type=click.Choice(["geometric", "osmnx"], case_sensitive=False),
+    default="geometric",
+    show_default=True,
+    help="Movement provider for all vehicles.",
+)
+@click.option(
+    "--osmnx-place-name",
+    default="San Francisco, California, USA",
+    show_default=True,
+    help="OSM place to load for road routing when using osmnx.",
+)
+@click.option(
+    "--osmnx-network-type",
+    default="drive",
+    type=click.Choice(["drive", "walk", "bike", "all"], case_sensitive=False),
+    show_default=True,
+    help="OSMnx network type when using osmnx.",
+)
 def main(
     ambulances: int,
     fire_trucks: int,
@@ -191,6 +234,9 @@ def main(
     redis_password: str | None,
     telemetry_frequency: float,
     jitter_km: float,
+    navigator_provider: str,
+    osmnx_place_name: str,
+    osmnx_network_type: str,
 ) -> None:
     """
     Start a simulated fleet of emergency vehicle agents for Project AEGIS.
@@ -238,10 +284,13 @@ def main(
                     redis_password=redis_password,
                     telemetry_frequency=telemetry_frequency,
                     jitter_km=jitter_km,
+                    navigator_provider=navigator_provider.lower(),
+                    osmnx_place_name=osmnx_place_name,
+                    osmnx_network_type=osmnx_network_type.lower(),
                 )
             )
 
-    agents = [VehicleAgent(cfg) for cfg in all_configs]
+    agents = _build_vehicle_agents(all_configs)
 
     click.echo("🚨 Project AEGIS - Fleet Simulation")
     click.echo(f"   Fleet ID    : {fleet_id}")
@@ -251,6 +300,7 @@ def main(
     click.echo(f"   Police      : {police}")
     click.echo(f"   Total       : {total} vehicles")
     click.echo(f"   Frequency   : {telemetry_frequency} Hz")
+    click.echo(f"   Navigator   : {navigator_provider.lower()}")
     click.echo()
     click.echo("Press Ctrl+C to stop")
     click.echo()

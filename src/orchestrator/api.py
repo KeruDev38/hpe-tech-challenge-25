@@ -15,13 +15,14 @@ import asyncio
 import json
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
+from src.core.time import FastForwardClock
 from src.models.emergency import (
     EMERGENCY_UNITS_DEFAULTS,
     Emergency,
@@ -132,7 +133,7 @@ class ConnectionManager:
         if not self._active:
             return
         message = json.dumps(
-            {"event": event_type, "data": data, "ts": datetime.utcnow().isoformat()}
+            {"event": event_type, "data": data, "ts": datetime.now(UTC).isoformat()}
         )
         dead: list[WebSocket] = []
         for ws in list(self._active):
@@ -166,29 +167,37 @@ def create_app(orchestrator: OrchestratorAgent) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncGenerator[None]:
-        """Start orchestrator listener on app startup, stop on shutdown."""
         db.connect()
+        
+        # Override the orchestrator's clock if it was initialized with RealClock
+        sim_start_time = datetime(2026, 3, 6, 18, 0, tzinfo=UTC)
+        shared_clock = FastForwardClock(start_at=sim_start_time)
+        orchestrator._clock = shared_clock
+
         task = asyncio.create_task(_run_orchestrator(orchestrator))
 
-        sim_start_time = datetime(2026, 3, 6, 18, 0)
-        ai_generator = EmergencyGenerator(
-            orchestrator, 
-            start_time=sim_start_time,
-            simulated_minutes_per_tick=MINUTES_PER_TICK,  # Jump 10 minutes forward...
-            tick_interval_seconds=SECOND_BEFORE_UPDATE    # ...every 3 real-world seconds
-        )
+        # Start Historical Injector
+        historical_injector = HistoricalCrimeInjector(orchestrator, clock=shared_clock, check_interval_seconds=1800.0)
+        hist_task = asyncio.create_task(historical_injector.start())
+        
+        # Start AI Predictor
+        ai_generator = EmergencyGenerator(orchestrator, clock=shared_clock, check_interval_seconds=1800.0)
         ai_gen_task = asyncio.create_task(ai_generator.start())
 
-        historical_injector = HistoricalCrimeInjector(
-            orchestrator, 
-            start_time=sim_start_time,
-            simulated_minutes_per_tick=MINUTES_PER_TICK,
-            tick_interval_seconds=SECOND_BEFORE_UPDATE
-        )
-        hist_task = asyncio.create_task(historical_injector.start())
+        # Time Machine Driver: Advances the FastForwardClock 30 mins every 3 real seconds
+        async def _drive_clock():
+            while not orchestrator.running:
+                await asyncio.sleep(0.1)
+
+            while orchestrator.running:
+                await asyncio.sleep(3.0)
+                shared_clock.advance(1800.0)
+                
+        clock_task = asyncio.create_task(_drive_clock())
 
         yield
 
+        # Teardown
         orchestrator.running = False
         ai_generator.stop()
         historical_injector.stop()
@@ -196,15 +205,8 @@ def create_app(orchestrator: OrchestratorAgent) -> FastAPI:
         task.cancel()
         ai_gen_task.cancel()
         hist_task.cancel()
-
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-        try:
-            await ai_gen_task
-        except asyncio.CancelledError:
-            pass
+        clock_task.cancel()
+        
         await orchestrator.stop()
         await db.disconnect()
 
@@ -212,11 +214,15 @@ def create_app(orchestrator: OrchestratorAgent) -> FastAPI:
         """Run the orchestrator Redis listener loop."""
         try:
             await orch.start()
-            async for raw in orch._pubsub.listen():  # type: ignore[union-attr]
+            async for raw in orch._bus.subscribe_patterns(
+                "aegis:*:telemetry:*",
+                "aegis:*:alerts:*",
+                "aegis:*:alerts_cleared:*",
+                "aegis:emergencies:new",
+                "aegis:*:vehicles:register",
+            ):
                 if not orch.running:
                     break
-                if raw["type"] not in ("message", "pmessage"):
-                    continue
                 await orch._handle_raw_message(raw)
         except asyncio.CancelledError:
             pass
@@ -255,6 +261,7 @@ def create_app(orchestrator: OrchestratorAgent) -> FastAPI:
             Summary and per-vehicle details.
         """
         summary = orchestrator.get_fleet_summary()
+        summary["simulated_time"] = orchestrator._clock.now().isoformat()
         vehicles = []
         for snap in orchestrator.fleet.values():
             vehicles.append(
@@ -272,7 +279,7 @@ def create_app(orchestrator: OrchestratorAgent) -> FastAPI:
                     "vibration_ms2": snap.vibration_ms2,
                     "brake_pad_mm": snap.brake_pad_mm,
                     "has_active_alert": snap.has_active_alert,
-                    "location": snap.location.model_dump(mode="json") if snap.location else None,
+                    "location": (snap.location.model_dump(mode="json") if snap.location else None),
                 }
             )
         return FleetResponse(summary=summary, vehicles=vehicles)
@@ -329,7 +336,7 @@ def create_app(orchestrator: OrchestratorAgent) -> FastAPI:
         location = Location(
             latitude=request.latitude,
             longitude=request.longitude,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(UTC),
         )
 
         # Use type-based defaults if no explicit units provided
@@ -479,8 +486,8 @@ def _emergency_to_dict(
         },
         "reported_by": emergency.reported_by,
         "created_at": emergency.created_at.isoformat(),
-        "dispatched_at": emergency.dispatched_at.isoformat() if emergency.dispatched_at else None,
-        "resolved_at": emergency.resolved_at.isoformat() if emergency.resolved_at else None,
+        "dispatched_at": (emergency.dispatched_at.isoformat() if emergency.dispatched_at else None),
+        "resolved_at": (emergency.resolved_at.isoformat() if emergency.resolved_at else None),
         "dispatch_id": dispatch.dispatch_id if dispatch else None,
         "assigned_vehicles": dispatch.vehicle_ids if dispatch else [],
     }

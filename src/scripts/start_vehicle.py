@@ -11,6 +11,8 @@ import sys
 import click
 import structlog
 
+from src.core.time import RealClock
+from src.infrastructure.redis_bus import RedisMessageBus
 from src.models.enums import VehicleType
 from src.vehicle_agent.agent import VehicleAgent
 from src.vehicle_agent.config import AgentConfig
@@ -68,6 +70,23 @@ logger = structlog.get_logger(__name__)
     help="Telemetry generation frequency in Hz (default: 1.0)",
 )
 @click.option(
+    "--navigator-provider",
+    type=click.Choice(["geometric", "osmnx"], case_sensitive=False),
+    default="geometric",
+    help="Movement provider to use (default: geometric)",
+)
+@click.option(
+    "--osmnx-place-name",
+    default="San Francisco, California, USA",
+    help="OSM place to load for road routing when using osmnx",
+)
+@click.option(
+    "--osmnx-network-type",
+    default="drive",
+    type=click.Choice(["drive", "walk", "bike", "all"], case_sensitive=False),
+    help="OSMnx network type (default: drive)",
+)
+@click.option(
     "--latitude",
     default=37.7749,
     type=float,
@@ -87,6 +106,9 @@ def main(
     redis_port: int,
     redis_password: str | None,
     telemetry_frequency: float,
+    navigator_provider: str,
+    osmnx_place_name: str,
+    osmnx_network_type: str,
     latitude: float,
     longitude: float,
 ) -> None:
@@ -122,6 +144,9 @@ def main(
             redis_port=redis_port,
             redis_password=redis_password,
             telemetry_frequency_hz=telemetry_frequency,
+            navigator_provider=navigator_provider.lower(),
+            osmnx_place_name=osmnx_place_name,
+            osmnx_network_type=osmnx_network_type.lower(),
             initial_latitude=latitude,
             initial_longitude=longitude,
         )
@@ -131,7 +156,13 @@ def main(
         sys.exit(1)
 
     # Create and run agent
-    agent = VehicleAgent(config)
+    bus = RedisMessageBus(
+        host=config.redis_host,
+        port=config.redis_port,
+        password=config.redis_password,
+        db=config.redis_db,
+    )
+    agent = VehicleAgent(config, message_bus=bus, clock=RealClock())
 
     click.echo("🚑 Project AEGIS - Vehicle Agent")
     click.echo(f"   Vehicle ID: {vehicle_id}")
@@ -139,6 +170,7 @@ def main(
     click.echo(f"   Fleet: {fleet_id}")
     click.echo(f"   Redis: {redis_host}:{redis_port}")
     click.echo(f"   Frequency: {telemetry_frequency} Hz")
+    click.echo(f"   Navigator: {navigator_provider.lower()}")
     click.echo(f"   Location: ({latitude:.4f}, {longitude:.4f})")
     click.echo()
     click.echo("Press Ctrl+C to stop")

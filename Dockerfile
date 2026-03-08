@@ -49,6 +49,7 @@ COPY --from=builder --chown=aegis:aegis /app/.venv /app/.venv
 
 # Copy application code
 COPY --chown=aegis:aegis src/ ./src/
+COPY --chown=aegis:aegis data/ ./data/
 COPY --chown=aegis:aegis main.py ./
 COPY --chown=aegis:aegis pyproject.toml ./
 
