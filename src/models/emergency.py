@@ -36,6 +36,7 @@ class EmergencyStatus(StrEnum):
     IN_PROGRESS = "in_progress"  # Units on scene
     RESOLVED = "resolved"  # Emergency handled
     CANCELLED = "cancelled"  # False alarm or duplicate
+    DISMISSED = "dismissed"  # Timed out and no longer considered active
 
 
 class EmergencySeverity(int, Enum):
@@ -82,7 +83,7 @@ class UnitsRequired(BaseModel):
 EMERGENCY_UNITS_DEFAULTS: dict[EmergencyType, UnitsRequired] = {
     EmergencyType.MEDICAL: UnitsRequired(ambulances=1),
     EmergencyType.FIRE: UnitsRequired(ambulances=1, fire_trucks=2),
-    EmergencyType.CRIME: UnitsRequired(police=2),
+    EmergencyType.CRIME: UnitsRequired(police=1),
     EmergencyType.ACCIDENT: UnitsRequired(ambulances=2, police=1),
     EmergencyType.HAZMAT: UnitsRequired(ambulances=1, fire_trucks=2, police=1),
     EmergencyType.RESCUE: UnitsRequired(ambulances=1, fire_trucks=1),
@@ -149,6 +150,7 @@ class Emergency(BaseModel):
         created_at: Timestamp when the emergency was registered.
         dispatched_at: Timestamp when units were dispatched.
         resolved_at: Timestamp when the emergency was resolved.
+        dismissed_at: Timestamp when the emergency was auto-dismissed.
         notes: Additional context or updates.
     """
 
@@ -188,6 +190,10 @@ class Emergency(BaseModel):
     )
     resolved_at: datetime | None = Field(
         default=None, description="Timestamp when emergency was resolved"
+    )
+    dismissed_at: datetime | None = Field(
+        default=None,
+        description="Timestamp when emergency was auto-dismissed",
     )
     notes: list[str] = Field(
         default_factory=list,

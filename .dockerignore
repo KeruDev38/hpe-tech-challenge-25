@@ -81,7 +81,6 @@ setup-hooks.sh
 Makefile
 
 # Data
-data/
 *.db
 *.sqlite
 *.sqlite3

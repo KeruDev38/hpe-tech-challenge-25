@@ -7,7 +7,7 @@ emergencies, and dispatch.
 
 # Enums
 # Alert models
-from .alerts import PredictiveAlert
+from .alerts import CrimePrediction, PredictiveAlert
 
 # Dispatch models
 from .dispatch import Dispatch, DispatchedUnit, VehicleStatusSnapshot
@@ -62,5 +62,6 @@ __all__ = [
     # Telemetry
     "VehicleTelemetry",
     # Alerts
+    "CrimePrediction",
     "PredictiveAlert",
 ]

@@ -17,7 +17,7 @@ from src.core.messaging import BusMessage, MessageBus
 from src.core.persistence import AlertSink, TelemetrySink
 from src.core.time import Clock, RealClock
 from src.infrastructure.redis_bus import RedisMessageBus
-from src.models.alerts import PredictiveAlert
+from src.models.alerts import CrimePrediction, PredictiveAlert
 from src.models.dispatch import Dispatch
 from src.models.emergency import Emergency, EmergencyStatus
 from src.models.enums import OperationalStatus
@@ -107,6 +107,7 @@ class OrchestratorAgent:
         self.emergencies = self.emergency_service.emergencies
         self.dispatches = self.emergency_service.dispatches
         self.active_alerts = self.fleet_service.active_alerts
+        self.active_crime_predictions: dict[str, CrimePrediction] = {}
 
         self._bus = message_bus or RedisMessageBus(
             host=self._redis_host,
@@ -359,18 +360,18 @@ class OrchestratorAgent:
             await self.process_emergency(emergency)
 
     async def _emergency_sweeper(self) -> None:
-        """Background task that periodically cancels or resolves stale emergencies.
+        """Background task that periodically cancels or dismisses stale emergencies.
 
         - DISPATCHING emergencies older than EMERGENCY_DISPATCH_TIMEOUT_MINUTES
           are cancelled (no units ever became available in time).
-        - DISPATCHED emergencies older than EMERGENCY_MAX_DURATION_MINUTES are
-          auto-resolved (scene work is assumed complete).
+        - DISPATCHED/IN_PROGRESS emergencies older than
+          EMERGENCY_MAX_DURATION_MINUTES are auto-dismissed.
         """
         while self.running:
             try:
                 await self._clock.sleep(SWEEPER_INTERVAL_SECONDS)
 
-                to_cancel, to_resolve = self.emergency_service.evaluate_stale_emergencies()
+                to_cancel, to_dismiss = self.emergency_service.evaluate_stale_emergencies()
 
                 for emergency in to_cancel:
                     logger.warning(
@@ -378,16 +379,16 @@ class OrchestratorAgent:
                         emergency_id=emergency.emergency_id,
                     )
 
-                for emergency in to_resolve:
+                for emergency in to_dismiss:
                     try:
-                        await self.resolve_emergency(emergency.emergency_id)
+                        await self.dismiss_emergency(emergency.emergency_id)
                         logger.info(
-                            "emergency_auto_resolved",
+                            "emergency_auto_dismissed",
                             emergency_id=emergency.emergency_id,
                         )
                     except Exception as exc:
                         logger.error(
-                            "auto_resolve_failed",
+                            "auto_dismiss_failed",
                             emergency_id=emergency.emergency_id,
                             error=str(exc),
                         )
@@ -499,6 +500,86 @@ class OrchestratorAgent:
         )
         return released
 
+    async def process_crime_prediction(self, prediction: CrimePrediction) -> None:
+        """Store and broadcast an AI crime prediction (non-dispatching event)."""
+        self.active_crime_predictions[prediction.prediction_id] = prediction
+
+        logger.info(
+            "crime_prediction_processed",
+            prediction_id=prediction.prediction_id,
+            neighborhood=prediction.neighborhood,
+            risk_probability=prediction.risk_probability,
+            severity=prediction.severity.value,
+        )
+
+        if self._ws_broadcast is not None:
+            asyncio.create_task(
+                self._ws_broadcast(
+                    "prediction.created",
+                    {
+                        "prediction_id": prediction.prediction_id,
+                        "neighborhood": prediction.neighborhood,
+                        "timestamp": prediction.timestamp.isoformat(),
+                        "risk_probability": prediction.risk_probability,
+                        "confidence": prediction.confidence,
+                        "severity": prediction.severity.value,
+                        "latitude": prediction.latitude,
+                        "longitude": prediction.longitude,
+                        "predicted_crime_type": prediction.predicted_crime_type,
+                        "description": prediction.description,
+                        "source": prediction.source,
+                    },
+                )
+            )
+
+    async def resolve_crime_prediction(self, prediction_id: str) -> None:
+        """Resolve and remove an existing AI crime prediction."""
+        prediction = self.active_crime_predictions.pop(prediction_id, None)
+        if prediction is None:
+            logger.warning("crime_prediction_not_found", prediction_id=prediction_id)
+            return
+
+        logger.info(
+            "crime_prediction_resolved",
+            prediction_id=prediction_id,
+            neighborhood=prediction.neighborhood,
+        )
+
+        if self._ws_broadcast is not None:
+            asyncio.create_task(
+                self._ws_broadcast(
+                    "prediction.resolved",
+                    {
+                        "prediction_id": prediction.prediction_id,
+                        "neighborhood": prediction.neighborhood,
+                        "timestamp": self._clock.now().isoformat(),
+                        "source": prediction.source,
+                    },
+                )
+            )
+    async def dismiss_emergency(self, emergency_id: str) -> list[str]:
+        """Mark an emergency as dismissed and release assigned units."""
+        released = self.emergency_service.dismiss_emergency(emergency_id)
+
+        if self.running:
+            channel = f"{DISPATCH_CHANNEL_PREFIX}:{emergency_id}:dismissed"
+            payload = {
+                "command": "dismiss",
+                "emergency_id": emergency_id,
+                "released_vehicles": released,
+            }
+            try:
+                await self._bus.publish(channel, json.dumps(payload))
+            except Exception as e:
+                logger.error("dismiss_broadcast_failed", emergency_id=emergency_id, error=str(e))
+
+        logger.info(
+            "emergency_dismissed",
+            emergency_id=emergency_id,
+            released_vehicles=released,
+        )
+        return released
+
     def get_fleet_summary(self) -> dict:
         """Return a summary of the current fleet state.
 
@@ -509,6 +590,11 @@ class OrchestratorAgent:
         active_emergencies_count = sum(
             1
             for e in self.emergencies.values()
-            if e.status not in (EmergencyStatus.RESOLVED, EmergencyStatus.CANCELLED)
+            if e.status
+            not in (
+                EmergencyStatus.RESOLVED,
+                EmergencyStatus.CANCELLED,
+                EmergencyStatus.DISMISSED,
+            )
         )
         return self.fleet_service.get_summary(active_emergencies_count)
