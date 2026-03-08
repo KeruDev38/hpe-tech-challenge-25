@@ -262,6 +262,13 @@ class OrchestratorAgent:
                 vehicle_id=vehicle_id,
             )
 
+        if (
+            snap.operational_status == OperationalStatus.ON_SCENE
+            and snap.current_emergency_id is not None
+        ):
+            self._record_unit_arrival(snap.current_emergency_id, vehicle_id)
+            await self._progress_coordination_tasks(snap.current_emergency_id)
+
         logger.debug("telemetry_processed", vehicle_id=vehicle_id)
 
         # Enqueue telemetry for asynchronous persistence
@@ -424,6 +431,66 @@ class OrchestratorAgent:
                 emergency_type=emergency.emergency_type.value,
             )
             await self.process_emergency(emergency)
+
+    def _record_unit_arrival(self, emergency_id: str, vehicle_id: str) -> None:
+        """Capture actual arrival timestamp and ETA error for one dispatched unit."""
+        dispatch = self.dispatches.get(emergency_id)
+        if dispatch is None:
+            return
+
+        unit = next((u for u in dispatch.units if u.vehicle_id == vehicle_id), None)
+        if unit is None or unit.actual_arrival_at is not None:
+            return
+
+        arrived_at = self._clock.now()
+        unit.actual_arrival_at = arrived_at
+
+        if dispatch.dispatched_at is not None:
+            actual_eta_minutes = (arrived_at - dispatch.dispatched_at).total_seconds() / 60.0
+            if unit.estimated_eta_minutes is not None:
+                unit.eta_error_minutes = round(actual_eta_minutes - unit.estimated_eta_minutes, 2)
+
+        logger.info(
+            "unit_arrival_recorded",
+            emergency_id=emergency_id,
+            vehicle_id=vehicle_id,
+            actual_arrival_at=arrived_at.isoformat(),
+            eta_error_minutes=unit.eta_error_minutes,
+        )
+
+    async def _progress_coordination_tasks(self, emergency_id: str) -> None:
+        """Advance emergency coordination stages once units are on scene."""
+        emergency = self.emergencies.get(emergency_id)
+        if emergency is None:
+            return
+
+        pending = [task for task, done in emergency.coordination_status.items() if not done]
+        if not pending:
+            if self.emergency_service.all_coordination_tasks_completed(emergency_id):
+                await self.resolve_emergency(emergency_id)
+            return
+
+        dispatch = self.dispatches.get(emergency_id)
+        if dispatch is None:
+            return
+
+        arrived_units = sum(1 for u in dispatch.units if u.actual_arrival_at is not None)
+        required_threshold = max(1, min(len(dispatch.units), len(emergency.coordination_status)))
+        completion_ratio = arrived_units / required_threshold
+
+        if completion_ratio < 1.0:
+            return
+
+        task = pending[0]
+        if self.emergency_service.mark_coordination_task_complete(emergency_id, task):
+            logger.info(
+                "coordination_task_completed",
+                emergency_id=emergency_id,
+                task=task,
+            )
+
+        if self.emergency_service.all_coordination_tasks_completed(emergency_id):
+            await self.resolve_emergency(emergency_id)
 
     async def _emergency_sweeper(self) -> None:
         """Background task that handles emergency lifecycle timing rules.

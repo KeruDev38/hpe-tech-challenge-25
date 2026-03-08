@@ -199,6 +199,10 @@ class Emergency(BaseModel):
         default_factory=list,
         description="Additional notes and status updates",
     )
+    coordination_status: dict[str, bool] = Field(
+        default_factory=dict,
+        description="Incident coordination checkpoints tracked by orchestrator",
+    )
 
     model_config = {
         "json_schema_extra": {

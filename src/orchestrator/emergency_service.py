@@ -32,6 +32,30 @@ DURATION_SEVERITY_MULTIPLIERS: dict[int, float] = {
     EmergencySeverity.CRITICAL.value: 1.75,
 }
 
+EMERGENCY_SUBTYPE_DURATION_HINTS: dict[str, float] = {
+    "cardiac": 1.3,
+    "stroke": 1.25,
+    "multi-vehicle": 1.35,
+    "pileup": 1.4,
+    "hazmat": 1.4,
+    "explosion": 1.35,
+    "wildfire": 1.5,
+    "active shooter": 1.45,
+    "hostage": 1.5,
+    "minor": 0.8,
+    "small": 0.85,
+}
+
+COORDINATION_TASKS_BY_TYPE: dict[EmergencyType, tuple[str, ...]] = {
+    EmergencyType.MEDICAL: ("scene_secure", "patient_stabilized", "transport_ready"),
+    EmergencyType.FIRE: ("scene_secure", "fire_contained", "evacuation_complete"),
+    EmergencyType.CRIME: ("scene_secure", "suspect_controlled", "victims_assisted"),
+    EmergencyType.ACCIDENT: ("scene_secure", "traffic_stabilized", "victims_assisted"),
+    EmergencyType.HAZMAT: ("scene_secure", "hazmat_contained", "decon_started"),
+    EmergencyType.RESCUE: ("scene_secure", "victim_extracted", "evacuation_complete"),
+    EmergencyType.NATURAL_DISASTER: ("scene_secure", "search_complete", "evacuation_complete"),
+}
+
 
 class EmergencyService:
     def __init__(
@@ -51,12 +75,29 @@ class EmergencyService:
         """Estimate expected on-scene duration based on type, severity, and scale."""
         base = EMERGENCY_BASE_DURATION_MINUTES.get(emergency.emergency_type, 20)
         severity_multiplier = DURATION_SEVERITY_MULTIPLIERS.get(emergency.severity.value, 1.0)
+        subtype_multiplier = self._duration_hint_multiplier(emergency.description)
 
         unit_scale = max(1, emergency.units_required.total)
         multi_unit_multiplier = 1.0 + 0.1 * (unit_scale - 1)
 
-        planned = base * severity_multiplier * multi_unit_multiplier
+        planned = base * severity_multiplier * multi_unit_multiplier * subtype_multiplier
         return max(8.0, planned)
+
+    def _duration_hint_multiplier(self, description: str) -> float:
+        """Infer duration multiplier from incident subtype keywords in description."""
+        normalized = description.lower()
+        multiplier = 1.0
+        for token, token_multiplier in EMERGENCY_SUBTYPE_DURATION_HINTS.items():
+            if token in normalized:
+                multiplier = max(multiplier, token_multiplier)
+        return multiplier
+
+    def _init_coordination_status(self, emergency: Emergency) -> None:
+        """Initialize coordination tasks for an emergency based on its type."""
+        if emergency.coordination_status:
+            return
+        tasks = COORDINATION_TASKS_BY_TYPE.get(emergency.emergency_type, ("scene_secure",))
+        emergency.coordination_status = dict.fromkeys(tasks, False)
 
     def _max_duration_minutes(self, emergency: Emergency) -> float:
         """Return hard timeout for in-progress incidents before forced dismissal."""
@@ -75,7 +116,10 @@ class EmergencyService:
 
         if dispatch.units:
             emergency.status = EmergencyStatus.DISPATCHED
-            emergency.dispatched_at = self._clock.now()
+            dispatched_at = self._clock.now()
+            emergency.dispatched_at = dispatched_at
+            dispatch.dispatched_at = dispatched_at
+            self._init_coordination_status(emergency)
         else:
             emergency.status = EmergencyStatus.DISPATCHING
 
@@ -94,6 +138,27 @@ class EmergencyService:
 
         # Release units via the Dispatch Engine
         return self.dispatch_engine.release_units(emergency_id)
+
+    def mark_coordination_task_complete(self, emergency_id: str, task: str) -> bool:
+        """Mark a named coordination task as complete for an emergency."""
+        emergency = self.emergencies.get(emergency_id)
+        if emergency is None:
+            return False
+
+        if task not in emergency.coordination_status:
+            emergency.coordination_status[task] = False
+        emergency.coordination_status[task] = True
+
+        if emergency.status == EmergencyStatus.DISPATCHED:
+            emergency.status = EmergencyStatus.IN_PROGRESS
+        return True
+
+    def all_coordination_tasks_completed(self, emergency_id: str) -> bool:
+        """Return whether all tracked coordination tasks are completed."""
+        emergency = self.emergencies.get(emergency_id)
+        if emergency is None or not emergency.coordination_status:
+            return False
+        return all(emergency.coordination_status.values())
 
     def dismiss_emergency(self, emergency_id: str) -> list[str]:
         """Mark an emergency as dismissed and release its units back to IDLE."""

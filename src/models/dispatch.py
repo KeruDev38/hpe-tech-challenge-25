@@ -39,6 +39,14 @@ class DispatchedUnit(BaseModel):
         default=None,
         description="Estimated arrival timestamp at incident",
     )
+    actual_arrival_at: datetime | None = Field(
+        default=None,
+        description="Actual arrival timestamp when unit reaches scene",
+    )
+    eta_error_minutes: float | None = Field(
+        default=None,
+        description="Actual ETA minus estimated ETA in minutes",
+    )
 
 
 class Dispatch(BaseModel):

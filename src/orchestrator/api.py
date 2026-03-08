@@ -517,6 +517,7 @@ def _emergency_to_dict(
         "dispatched_at": (emergency.dispatched_at.isoformat() if emergency.dispatched_at else None),
         "resolved_at": (emergency.resolved_at.isoformat() if emergency.resolved_at else None),
         "dismissed_at": (emergency.dismissed_at.isoformat() if emergency.dismissed_at else None),
+        "coordination_status": emergency.coordination_status,
         "dispatch_id": dispatch.dispatch_id if dispatch else None,
         "assigned_vehicles": dispatch.vehicle_ids if dispatch else [],
     }
