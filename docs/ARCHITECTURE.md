@@ -24,6 +24,10 @@ This document is the canonical high-level view of how AEGIS components interact.
 - **API + Dashboard** (`src/orchestrator/api.py`, `main.py`)
   - Fleet/emergency/alert read APIs
   - Streamlit visualization
+- **Simulation & AI Engine** (`src/orchestrator/emergency_generator.py`, `src/orchestrator/historical_injector.py`, `src/ml/`)
+  - **AI Predictor:** Uses a trained Random Forest model to proactively predict high-risk crime zones and pre-dispatch units.
+  - **Historical Injector:** Injects real holdout crimes randomly alongside predictions to visually validate model accuracy.
+  - Both generators are synchronized strictly via the `Clock` abstraction for deterministic time travel.
 
 ## Core Runtime Contracts
 
@@ -39,6 +43,12 @@ This document is the canonical high-level view of how AEGIS components interact.
   - Persistence side-effect contracts
 
 ## Event Flow Map
+
+### 0) Training the Model
+Before running the Orchestrator or Docker containers, the ML model must be trained locally to generate the required artifacts. From the project root, execute:
+```bash
+python src/ml/train_crime.py
+```
 
 ### 1) Vehicle startup registration
 

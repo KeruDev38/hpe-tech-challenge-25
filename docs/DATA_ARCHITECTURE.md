@@ -99,6 +99,10 @@ The architecture now separates:
   - alerts persisted by `DatabaseAlertPersister`
 - DB writes are asynchronous relative to control-loop behavior.
 
+## Machine Learning Artifacts
+- Training Data: The file acts as the read-only foundational dataset. The ML pipeline uses 80% for training, while the `HistoricalCrimeInjector` uses the chronologically newest 20% for real-time holdout validation.
+- Serialized Model: Executing `src/ml/train_crime.py` processes the CSV features and persists the trained Random Forest Classifier state to `src/ml/crime_model.joblib`. This `.joblib` file acts as the runtime brain loaded into memory by the Orchestrator API.
+
 ## Time and Determinism
 
 - Runtime uses `RealClock`.
