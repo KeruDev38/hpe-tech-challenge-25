@@ -59,6 +59,11 @@ Install dependencies:
 uv sync
 ```
 
+Train prediction AI model:
+```bash
+python src/ml/train_crime.py
+```
+
 Run orchestrator API:
 
 ```bash

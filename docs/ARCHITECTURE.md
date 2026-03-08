@@ -44,12 +44,6 @@ This document is the canonical high-level view of how AEGIS components interact.
 
 ## Event Flow Map
 
-### 0) Training the Model
-Before running the Orchestrator or Docker containers, the ML model must be trained locally to generate the required artifacts. From the project root, execute:
-```bash
-python src/ml/train_crime.py
-```
-
 ### 1) Vehicle startup registration
 
 1. Vehicle starts.
