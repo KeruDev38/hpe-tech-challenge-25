@@ -216,15 +216,13 @@ def _render_folium_map(
                 location=[e["latitude"], e["longitude"]],
                 popup=folium.Popup(popup_html, max_width=260),
                 tooltip=f"🚨 {etype} (sev {severity})",
-                icon=folium.Icon(
-                    color="orange", icon="exclamation-sign", prefix="glyphicon"
-                ),
+                icon=folium.Icon(color="orange", icon="exclamation-sign", prefix="glyphicon"),
             ).add_to(fmap)
 
     if not has_any_marker:
         # Fallback label when orchestrator is offline
         folium.Marker(
-            location=sf_center,
+            location=default_center,
             tooltip="Waiting for data…",
             icon=folium.Icon(color="gray", icon="time", prefix="glyphicon"),
         ).add_to(fmap)
@@ -245,9 +243,7 @@ def _render_alert_panel(alerts: list | None) -> None:
 
     # Sort: critical first, then warning, then info
     severity_order = {"critical": 0, "warning": 1, "info": 2}
-    sorted_alerts = sorted(
-        alerts, key=lambda a: severity_order.get(a.get("severity", "info"), 3)
-    )
+    sorted_alerts = sorted(alerts, key=lambda a: severity_order.get(a.get("severity", "info"), 3))
 
     for alert in sorted_alerts:
         sev = alert.get("severity", "info")
@@ -338,9 +334,7 @@ def main() -> None:
     with col_list:
         st.subheader("Active Scenarios & Crimes")
         if emergencies:
-            active_emergencies = [
-                e for e in emergencies if e.get("status") != "resolved"
-            ]
+            active_emergencies = [e for e in emergencies if e.get("status") != "resolved"]
             if active_emergencies:
                 for e in active_emergencies:
                     with st.expander(
@@ -367,24 +361,14 @@ def main() -> None:
 
         st.subheader("Emergency Timeline")
         if emergencies:
-            sorted_em = sorted(
-                emergencies, key=lambda x: x.get("created_at", ""), reverse=True
-            )
+            sorted_em = sorted(emergencies, key=lambda x: x.get("created_at", ""), reverse=True)
             for e in sorted_em[:10]:
                 created = str(e.get("created_at", ""))[:19].replace("T", " ")
                 status = e.get("status", "unknown")
-                icon = (
-                    "✅"
-                    if status == "resolved"
-                    else ("🚨" if status == "pending" else "🚙")
-                )
-                st.markdown(
-                    f"**{created}** {icon} {e['emergency_type'].upper()} ({status})"
-                )
+                icon = "✅" if status == "resolved" else ("🚨" if status == "pending" else "🚙")
+                st.markdown(f"**{created}** {icon} {e['emergency_type'].upper()} ({status})")
                 if e.get("dispatched_at") and status != "resolved":
-                    st.text(
-                        f"    → {len(e.get('assigned_vehicles', []))} units dispatched"
-                    )
+                    st.text(f"    → {len(e.get('assigned_vehicles', []))} units dispatched")
         else:
             st.info("No timeline events yet.")
 
@@ -459,9 +443,7 @@ def main() -> None:
                 if by_type:
                     st.caption("Fleet breakdown by type")
                     type_cols = st.columns(len(by_type))
-                    for tc, (vtype, counts) in zip(
-                        type_cols, by_type.items(), strict=False
-                    ):
+                    for tc, (vtype, counts) in zip(type_cols, by_type.items(), strict=False):
                         tc.metric(
                             vtype.replace("_", " ").title(),
                             f"{counts['available']}/{counts['total']} avail",

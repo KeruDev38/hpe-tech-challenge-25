@@ -254,9 +254,7 @@ def create_app(orchestrator: OrchestratorAgent) -> FastAPI:
                     "vibration_ms2": snap.vibration_ms2,
                     "brake_pad_mm": snap.brake_pad_mm,
                     "has_active_alert": snap.has_active_alert,
-                    "location": (
-                        snap.location.model_dump(mode="json") if snap.location else None
-                    ),
+                    "location": (snap.location.model_dump(mode="json") if snap.location else None),
                 }
             )
         return FleetResponse(summary=summary, vehicles=vehicles)
@@ -317,9 +315,7 @@ def create_app(orchestrator: OrchestratorAgent) -> FastAPI:
         )
 
         # Use type-based defaults if no explicit units provided
-        units_required = (
-            request.units_required or EMERGENCY_UNITS_DEFAULTS[request.emergency_type]
-        )
+        units_required = request.units_required or EMERGENCY_UNITS_DEFAULTS[request.emergency_type]
 
         emergency = Emergency(
             emergency_type=request.emergency_type,
@@ -465,12 +461,8 @@ def _emergency_to_dict(
         },
         "reported_by": emergency.reported_by,
         "created_at": emergency.created_at.isoformat(),
-        "dispatched_at": (
-            emergency.dispatched_at.isoformat() if emergency.dispatched_at else None
-        ),
-        "resolved_at": (
-            emergency.resolved_at.isoformat() if emergency.resolved_at else None
-        ),
+        "dispatched_at": (emergency.dispatched_at.isoformat() if emergency.dispatched_at else None),
+        "resolved_at": (emergency.resolved_at.isoformat() if emergency.resolved_at else None),
         "dispatch_id": dispatch.dispatch_id if dispatch else None,
         "assigned_vehicles": dispatch.vehicle_ids if dispatch else [],
     }
